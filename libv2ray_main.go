@@ -36,6 +36,7 @@ type CoreController struct {
 	statsManager    corestats.Manager
 	coreMutex       sync.Mutex
 	coreInstance    *core.Instance
+	httpClient      *http.Client
 	IsRunning       bool
 }
 
@@ -145,7 +146,7 @@ func (x *CoreController) MeasureDelay(url string) (int64, error) {
 	ctx, cancel := context.WithTimeout(context.Background(), 12*time.Second)
 	defer cancel()
 
-	return measureInstDelay(ctx, x.coreInstance, url)
+	return measureInstDelay(ctx, x.httpClient, url)
 }
 
 // MeasureOutboundDelay measures the outbound delay for a given configuration and URL
@@ -167,7 +168,24 @@ func MeasureOutboundDelay(ConfigureFileContent string, url string) (int64, error
 		return -1, fmt.Errorf("startup failed: %w", err)
 	}
 	defer inst.Close()
-	return measureInstDelay(context.Background(), inst, url)
+
+	tr := &http.Transport{
+		TLSHandshakeTimeout: 6 * time.Second,
+		DisableKeepAlives:   false,
+		DialContext: func(ctx context.Context, network, addr string) (net.Conn, error) {
+			dest, err := corenet.ParseDestination(fmt.Sprintf("%s:%s", network, addr))
+			if err != nil {
+				return nil, err
+			}
+			return core.Dial(ctx, inst, dest)
+		},
+	}
+	client := &http.Client{
+		Transport: tr,
+		Timeout:   12 * time.Second,
+	}
+
+	return measureInstDelay(context.Background(), client, url)
 }
 
 // CheckVersionX returns the library and v2fly versions
@@ -178,6 +196,11 @@ func CheckVersionX() string {
 
 // doShutdown shuts down the v2fly instance and cleans up resources
 func (x *CoreController) doShutdown() {
+	if x.httpClient != nil {
+		x.httpClient.CloseIdleConnections()
+		x.httpClient = nil
+	}
+
 	if x.coreInstance != nil {
 		if err := x.coreInstance.Close(); err != nil {
 			log.Printf("Core shutdown error: %v", err)
@@ -202,6 +225,23 @@ func (x *CoreController) doStartLoop(configContent string) error {
 	}
 	x.statsManager = x.coreInstance.GetFeature(corestats.ManagerType()).(corestats.Manager)
 
+	// Create a reusable http client
+	tr := &http.Transport{
+		TLSHandshakeTimeout: 6 * time.Second,
+		DisableKeepAlives:   false,
+		DialContext: func(ctx context.Context, network, addr string) (net.Conn, error) {
+			dest, err := corenet.ParseDestination(fmt.Sprintf("%s:%s", network, addr))
+			if err != nil {
+				return nil, err
+			}
+			return core.Dial(ctx, x.coreInstance, dest)
+		},
+	}
+	x.httpClient = &http.Client{
+		Transport: tr,
+		Timeout:   12 * time.Second,
+	}
+
 	log.Println("Starting core...")
 	x.IsRunning = true
 	if err := x.coreInstance.Start(); err != nil {
@@ -216,27 +256,11 @@ func (x *CoreController) doStartLoop(configContent string) error {
 	return nil
 }
 
-// measureInstDelay measures the delay for an instance to a given URL
-func measureInstDelay(ctx context.Context, inst *core.Instance, url string) (int64, error) {
-	if inst == nil {
-		return -1, errors.New("core instance is nil")
-	}
-
-	tr := &http.Transport{
-		TLSHandshakeTimeout: 6 * time.Second,
-		DisableKeepAlives:   false,
-		DialContext: func(ctx context.Context, network, addr string) (net.Conn, error) {
-			dest, err := corenet.ParseDestination(fmt.Sprintf("%s:%s", network, addr))
-			if err != nil {
-				return nil, err
-			}
-			return core.Dial(ctx, inst, dest)
-		},
-	}
-
-	client := &http.Client{
-		Transport: tr,
-		Timeout:   12 * time.Second,
+// measureInstDelay measures the delay for a given http.Client to a URL.
+// By reusing the client, we can take advantage of keep-alive connections.
+func measureInstDelay(ctx context.Context, client *http.Client, url string) (int64, error) {
+	if client == nil {
+		return -1, errors.New("http client is nil")
 	}
 
 	if url == "" {
