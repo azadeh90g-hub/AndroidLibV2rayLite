@@ -6,6 +6,7 @@ import (
 	"fmt"
 	"io"
 	"log"
+	"math/rand"
 	"net"
 	"net/http"
 	"os"
@@ -240,7 +241,17 @@ func measureInstDelay(ctx context.Context, inst *core.Instance, url string) (int
 	}
 
 	if url == "" {
-		url = "https://www.google.com/generate_204"
+		// List of latency test URLs
+		urls := []string{
+			"https://www.google.com/generate_204",
+			"https://www.apple.com/library/test/success.html",
+			"https://www.cloudflare.com/cdn-cgi/trace",
+		}
+		// Create a new random number generator with a unique seed
+		// This is safe for concurrent use.
+		r := rand.New(rand.NewSource(time.Now().UnixNano()))
+		// Pick a random URL from the list
+		url = urls[r.Intn(len(urls))]
 	}
 
 	req, err := http.NewRequestWithContext(ctx, "GET", url, nil)
