@@ -37,6 +37,7 @@ type CoreController struct {
 	coreMutex       sync.Mutex
 	coreInstance    *core.Instance
 	IsRunning       bool
+	httpClient      *http.Client
 }
 
 // CoreCallbackHandler defines interface for receiving callbacks and notifications from the core service
@@ -138,14 +139,60 @@ func (x *CoreController) QueryStats(tag string, direct string) int64 {
 	return counter.Set(0)
 }
 
-// MeasureDelay measures network latency to a specified URL through the current core instance
-// Uses a 12-second timeout context and returns the round-trip time in milliseconds
-// An error is returned if the connection fails or returns an unexpected status
+// MeasureDelay measures network latency to a specified URL using the core's shared http.Client.
+// By reusing the client, this function benefits from connection pooling and avoids the overhead of repeated TCP and TLS handshakes,
+// leading to a significant performance improvement for consecutive delay measurements.
 func (x *CoreController) MeasureDelay(url string) (int64, error) {
+	if x.httpClient == nil {
+		return -1, errors.New("http client is not initialized")
+	}
+
+	if url == "" {
+		url = "https://www.google.com/generate_204"
+	}
+
 	ctx, cancel := context.WithTimeout(context.Background(), 12*time.Second)
 	defer cancel()
 
-	return measureInstDelay(ctx, x.coreInstance, url)
+	req, err := http.NewRequestWithContext(ctx, "GET", url, nil)
+	if err != nil {
+		return -1, fmt.Errorf("failed to create HTTP request: %w", err)
+	}
+
+	var minDuration int64 = -1
+	success := false
+	var lastErr error
+
+	const attempts = 2
+	for i := 0; i < attempts; i++ {
+		start := time.Now()
+		resp, err := x.httpClient.Do(req)
+		if err != nil {
+			lastErr = err
+			continue
+		}
+
+		if resp != nil && resp.Body != nil {
+			io.Copy(io.Discard, resp.Body)
+			resp.Body.Close()
+		}
+
+		if resp.StatusCode != http.StatusOK && resp.StatusCode != http.StatusNoContent {
+			lastErr = fmt.Errorf("invalid status: %s", resp.Status)
+			continue
+		}
+
+		duration := time.Since(start).Milliseconds()
+		if !success || duration < minDuration {
+			minDuration = duration
+		}
+
+		success = true
+	}
+	if !success {
+		return -1, lastErr
+	}
+	return minDuration, nil
 }
 
 // MeasureOutboundDelay measures the outbound delay for a given configuration and URL
@@ -178,6 +225,13 @@ func CheckVersionX() string {
 
 // doShutdown shuts down the v2fly instance and cleans up resources
 func (x *CoreController) doShutdown() {
+	// Optimization: Close idle connections and release resources of the shared http client.
+	if x.httpClient != nil {
+		if tr, ok := x.httpClient.Transport.(*http.Transport); ok {
+			tr.CloseIdleConnections()
+		}
+		x.httpClient = nil
+	}
 	if x.coreInstance != nil {
 		if err := x.coreInstance.Close(); err != nil {
 			log.Printf("Core shutdown error: %v", err)
@@ -201,6 +255,23 @@ func (x *CoreController) doStartLoop(configContent string) error {
 		return fmt.Errorf("core initialization failed: %w", err)
 	}
 	x.statsManager = x.coreInstance.GetFeature(corestats.ManagerType()).(corestats.Manager)
+
+	// Optimization: Initialize a reusable http.Client to avoid overhead from creating new clients on each delay measurement.
+	// This client is configured to use the V2Ray core for dialing, enabling connection pooling and reducing setup time.
+	x.httpClient = &http.Client{
+		Transport: &http.Transport{
+			TLSHandshakeTimeout: 6 * time.Second,
+			DisableKeepAlives:   false,
+			DialContext: func(ctx context.Context, network, addr string) (net.Conn, error) {
+				dest, err := corenet.ParseDestination(fmt.Sprintf("%s:%s", network, addr))
+				if err != nil {
+					return nil, err
+				}
+				return core.Dial(ctx, x.coreInstance, dest)
+			},
+		},
+		Timeout: 12 * time.Second,
+	}
 
 	log.Println("Starting core...")
 	x.IsRunning = true
