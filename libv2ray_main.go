@@ -13,6 +13,7 @@ import (
 	"strings"
 	"sync"
 	"time"
+	"net/url"
 
 	core "github.com/v2fly/v2ray-core/v5"
 	coreapplog "github.com/v2fly/v2ray-core/v5/app/log"
@@ -217,9 +218,33 @@ func (x *CoreController) doStartLoop(configContent string) error {
 }
 
 // measureInstDelay measures the delay for an instance to a given URL
-func measureInstDelay(ctx context.Context, inst *core.Instance, url string) (int64, error) {
+func measureInstDelay(ctx context.Context, inst *core.Instance, rawURL string) (int64, error) {
 	if inst == nil {
 		return -1, errors.New("core instance is nil")
+	}
+
+	// Add URL validation to prevent SSRF vulnerabilities.
+	parsedURL, err := url.Parse(rawURL)
+	if err != nil {
+		return -1, fmt.Errorf("invalid URL format: %w", err)
+	}
+
+	// Ensure the URL resolves to a public IP address.
+	ips, err := net.LookupIP(parsedURL.Hostname())
+	if err != nil {
+		return -1, fmt.Errorf("DNS lookup failed: %w", err)
+	}
+
+	var hasPublicIP bool
+	for _, ip := range ips {
+		if isPublicIP(ip) {
+			hasPublicIP = true
+			break
+		}
+	}
+
+	if !hasPublicIP {
+		return -1, errors.New("URL must resolve to a public IP address to prevent SSRF attacks")
 	}
 
 	tr := &http.Transport{
@@ -239,11 +264,11 @@ func measureInstDelay(ctx context.Context, inst *core.Instance, url string) (int
 		Timeout:   12 * time.Second,
 	}
 
-	if url == "" {
-		url = "https://www.google.com/generate_204"
+	if rawURL == "" {
+		rawURL = "https://www.google.com/generate_204"
 	}
 
-	req, err := http.NewRequestWithContext(ctx, "GET", url, nil)
+	req, err := http.NewRequestWithContext(ctx, "GET", rawURL, nil)
 	if err != nil {
 		return -1, fmt.Errorf("failed to create HTTP request: %w", err)
 	}
@@ -312,6 +337,12 @@ func (w *consoleLogWriter) Write(s string) error {
 
 func (w *consoleLogWriter) Close() error {
 	return nil
+}
+
+// isPublicIP checks if the given IP address is a public IP.
+// It returns false for private, loopback, and unspecified IPs.
+func isPublicIP(ip net.IP) bool {
+	return ip != nil && !ip.IsLoopback() && !ip.IsPrivate() && !ip.IsUnspecified()
 }
 
 // createStdoutLogWriter creates a logger that won't print date/time stamps
