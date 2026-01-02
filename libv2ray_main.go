@@ -34,6 +34,7 @@ const (
 type CoreController struct {
 	CallbackHandler CoreCallbackHandler
 	statsManager    corestats.Manager
+	httpClient      *http.Client // Reused for performance
 	coreMutex       sync.Mutex
 	coreInstance    *core.Instance
 	IsRunning       bool
@@ -142,10 +143,71 @@ func (x *CoreController) QueryStats(tag string, direct string) int64 {
 // Uses a 12-second timeout context and returns the round-trip time in milliseconds
 // An error is returned if the connection fails or returns an unexpected status
 func (x *CoreController) MeasureDelay(url string) (int64, error) {
+	if x.httpClient == nil {
+		return -1, errors.New("http client not initialized")
+	}
+
+	if url == "" {
+		url = "https://www.google.com/generate_204"
+	}
+
 	ctx, cancel := context.WithTimeout(context.Background(), 12*time.Second)
 	defer cancel()
 
-	return measureInstDelay(ctx, x.coreInstance, url)
+	req, err := http.NewRequestWithContext(ctx, "GET", url, nil)
+	if err != nil {
+		return -1, fmt.Errorf("failed to create http request: %w", err)
+	}
+
+	var minDuration int64 = -1
+	success := false
+	var lastErr error
+
+	const attempts = 2
+	for i := 0; i < attempts; i++ {
+		select {
+		case <-ctx.Done():
+			if !success {
+				return -1, ctx.Err()
+			}
+			return minDuration, nil
+		default:
+		}
+
+		start := time.Now()
+		resp, err := x.httpClient.Do(req)
+		if err != nil {
+			lastErr = err
+			continue
+		}
+		defer func(resp *http.Response) {
+			if resp != nil && resp.Body != nil {
+				resp.Body.Close()
+			}
+		}(resp)
+
+		if resp.StatusCode != http.StatusOK && resp.StatusCode != http.StatusNoContent {
+			lastErr = fmt.Errorf("invalid status: %s", resp.Status)
+			continue
+		}
+
+		if _, err := io.Copy(io.Discard, resp.Body); err != nil {
+			lastErr = fmt.Errorf("failed to read response body: %w", err)
+			continue
+		}
+
+		duration := time.Since(start).Milliseconds()
+		if !success || duration < minDuration {
+			minDuration = duration
+		}
+
+		success = true
+	}
+
+	if !success {
+		return -1, lastErr
+	}
+	return minDuration, nil
 }
 
 // MeasureOutboundDelay measures the outbound delay for a given configuration and URL
@@ -167,7 +229,50 @@ func MeasureOutboundDelay(ConfigureFileContent string, url string) (int64, error
 		return -1, fmt.Errorf("startup failed: %w", err)
 	}
 	defer inst.Close()
-	return measureInstDelay(context.Background(), inst, url)
+
+	// Reusing the logic from MeasureDelay to avoid code duplication
+	// This creates a temporary client for a one-off measurement
+	tempClient := &http.Client{
+		Transport: &http.Transport{
+			TLSHandshakeTimeout: 6 * time.Second,
+			DisableKeepAlives:   false,
+			DialContext: func(ctx context.Context, network, addr string) (net.Conn, error) {
+				dest, err := corenet.ParseDestination(fmt.Sprintf("%s:%s", network, addr))
+				if err != nil {
+					return nil, err
+				}
+				return core.Dial(ctx, inst, dest)
+			},
+		},
+		Timeout: 12 * time.Second,
+	}
+
+	if url == "" {
+		url = "https://www.google.com/generate_204"
+	}
+
+	req, err := http.NewRequestWithContext(context.Background(), "GET", url, nil)
+	if err != nil {
+		return -1, fmt.Errorf("failed to create http request: %w", err)
+	}
+
+	start := time.Now()
+	resp, err := tempClient.Do(req)
+	if err != nil {
+		return -1, err
+	}
+	defer resp.Body.Close()
+
+	if resp.StatusCode != http.StatusOK && resp.StatusCode != http.StatusNoContent {
+		return -1, fmt.Errorf("invalid status: %s", resp.Status)
+	}
+
+	_, err = io.Copy(io.Discard, resp.Body)
+	if err != nil {
+		return -1, fmt.Errorf("failed to read response body: %w", err)
+	}
+
+	return time.Since(start).Milliseconds(), nil
 }
 
 // CheckVersionX returns the library and v2fly versions
@@ -186,6 +291,7 @@ func (x *CoreController) doShutdown() {
 	}
 	x.IsRunning = false
 	x.statsManager = nil
+	x.httpClient = nil
 }
 
 // doStartLoop sets up and starts the v2fly core
@@ -201,6 +307,21 @@ func (x *CoreController) doStartLoop(configContent string) error {
 		return fmt.Errorf("core initialization failed: %w", err)
 	}
 	x.statsManager = x.coreInstance.GetFeature(corestats.ManagerType()).(corestats.Manager)
+	// Create a reusable http client to optimize performance by reusing TCP/TLS connections
+	x.httpClient = &http.Client{
+		Transport: &http.Transport{
+			TLSHandshakeTimeout: 6 * time.Second,
+			DisableKeepAlives:   false,
+			DialContext: func(ctx context.Context, network, addr string) (net.Conn, error) {
+				dest, err := corenet.ParseDestination(fmt.Sprintf("%s:%s", network, addr))
+				if err != nil {
+					return nil, err
+				}
+				return core.Dial(ctx, x.coreInstance, dest)
+			},
+		},
+		Timeout: 12 * time.Second,
+	}
 
 	log.Println("Starting core...")
 	x.IsRunning = true
@@ -216,93 +337,6 @@ func (x *CoreController) doStartLoop(configContent string) error {
 	return nil
 }
 
-// measureInstDelay measures the delay for an instance to a given URL
-func measureInstDelay(ctx context.Context, inst *core.Instance, url string) (int64, error) {
-	if inst == nil {
-		return -1, errors.New("core instance is nil")
-	}
-
-	tr := &http.Transport{
-		TLSHandshakeTimeout: 6 * time.Second,
-		DisableKeepAlives:   false,
-		DialContext: func(ctx context.Context, network, addr string) (net.Conn, error) {
-			dest, err := corenet.ParseDestination(fmt.Sprintf("%s:%s", network, addr))
-			if err != nil {
-				return nil, err
-			}
-			return core.Dial(ctx, inst, dest)
-		},
-	}
-
-	client := &http.Client{
-		Transport: tr,
-		Timeout:   12 * time.Second,
-	}
-
-	if url == "" {
-		url = "https://www.google.com/generate_204"
-	}
-
-	req, err := http.NewRequestWithContext(ctx, "GET", url, nil)
-	if err != nil {
-		return -1, fmt.Errorf("failed to create HTTP request: %w", err)
-	}
-
-	var minDuration int64 = -1
-	success := false
-	var lastErr error
-
-	// Add exception handling and increase retry attempts
-	const attempts = 2
-	for i := 0; i < attempts; i++ {
-		select {
-		case <-ctx.Done():
-			// Return immediately when context is canceled
-			if !success {
-				return -1, ctx.Err()
-			}
-			return minDuration, nil
-		default:
-			// Continue execution
-		}
-
-		start := time.Now()
-		resp, err := client.Do(req)
-		if err != nil {
-			lastErr = err
-			continue
-		}
-
-		// Ensure response body is closed
-		defer func(resp *http.Response) {
-			if resp != nil && resp.Body != nil {
-				resp.Body.Close()
-			}
-		}(resp)
-
-		if resp.StatusCode != http.StatusOK && resp.StatusCode != http.StatusNoContent {
-			lastErr = fmt.Errorf("invalid status: %s", resp.Status)
-			continue
-		}
-
-		// Handle possible errors when reading response body
-		if _, err := io.Copy(io.Discard, resp.Body); err != nil {
-			lastErr = fmt.Errorf("failed to read response body: %w", err)
-			continue
-		}
-
-		duration := time.Since(start).Milliseconds()
-		if !success || duration < minDuration {
-			minDuration = duration
-		}
-
-		success = true
-	}
-	if !success {
-		return -1, lastErr
-	}
-	return minDuration, nil
-}
 
 // Log writer implementation
 func (w *consoleLogWriter) Write(s string) error {
