@@ -70,11 +70,16 @@ func InitCoreEnv(envPath string, key string) {
 
 	// Custom file reader with path validation
 	corefilesystem.NewFileReader = func(path string) (io.ReadCloser, error) {
-		if _, err := os.Stat(path); os.IsNotExist(err) {
-			_, file := filepath.Split(path)
+		cleanedPath := filepath.Clean(path)
+		if strings.Contains(cleanedPath, "..") {
+			return nil, fmt.Errorf("path traversal attempt detected in path: %s", path)
+		}
+
+		if _, err := os.Stat(cleanedPath); os.IsNotExist(err) {
+			_, file := filepath.Split(cleanedPath)
 			return mobasset.Open(file)
 		}
-		return os.Open(path)
+		return os.Open(cleanedPath)
 	}
 }
 
