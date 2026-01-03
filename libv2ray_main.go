@@ -37,6 +37,8 @@ type CoreController struct {
 	coreMutex       sync.Mutex
 	coreInstance    *core.Instance
 	IsRunning       bool
+	httpClient      *http.Client
+	httpTransport   *http.Transport
 }
 
 // CoreCallbackHandler defines interface for receiving callbacks and notifications from the core service
@@ -138,14 +140,17 @@ func (x *CoreController) QueryStats(tag string, direct string) int64 {
 	return counter.Set(0)
 }
 
-// MeasureDelay measures network latency to a specified URL through the current core instance
-// Uses a 12-second timeout context and returns the round-trip time in milliseconds
-// An error is returned if the connection fails or returns an unexpected status
+// MeasureDelay measures network latency to a specified URL using the cached http client.
+// This is much more efficient than creating a new client for each call.
 func (x *CoreController) MeasureDelay(url string) (int64, error) {
+	if x.httpClient == nil {
+		return -1, errors.New("http client is not initialized")
+	}
 	ctx, cancel := context.WithTimeout(context.Background(), 12*time.Second)
 	defer cancel()
 
-	return measureInstDelay(ctx, x.coreInstance, url)
+	// The httpClient is already configured to use the correct v2ray instance dialer
+	return measureInstDelay(ctx, x.httpClient, url)
 }
 
 // MeasureOutboundDelay measures the outbound delay for a given configuration and URL
@@ -167,7 +172,25 @@ func MeasureOutboundDelay(ConfigureFileContent string, url string) (int64, error
 		return -1, fmt.Errorf("startup failed: %w", err)
 	}
 	defer inst.Close()
-	return measureInstDelay(context.Background(), inst, url)
+
+	// Create a temporary transport and client for this one-off measurement.
+	// This is less efficient but necessary for a standalone function.
+	tr := &http.Transport{
+		TLSHandshakeTimeout: 6 * time.Second,
+		DialContext: func(ctx context.Context, network, addr string) (net.Conn, error) {
+			dest, err := corenet.ParseDestination(fmt.Sprintf("%s:%s", network, addr))
+			if err != nil {
+				return nil, err
+			}
+			return core.Dial(ctx, inst, dest)
+		},
+	}
+	client := &http.Client{
+		Transport: tr,
+		Timeout:   12 * time.Second,
+	}
+
+	return measureInstDelay(context.Background(), client, url)
 }
 
 // CheckVersionX returns the library and v2fly versions
@@ -178,6 +201,13 @@ func CheckVersionX() string {
 
 // doShutdown shuts down the v2fly instance and cleans up resources
 func (x *CoreController) doShutdown() {
+	// Close idle connections of the cached http client
+	if x.httpTransport != nil {
+		x.httpTransport.CloseIdleConnections()
+		x.httpTransport = nil
+	}
+	x.httpClient = nil
+
 	if x.coreInstance != nil {
 		if err := x.coreInstance.Close(); err != nil {
 			log.Printf("Core shutdown error: %v", err)
@@ -202,6 +232,27 @@ func (x *CoreController) doStartLoop(configContent string) error {
 	}
 	x.statsManager = x.coreInstance.GetFeature(corestats.ManagerType()).(corestats.Manager)
 
+	// Initialize the shared HTTP transport and client for reuse.
+	// This is a performance optimization that allows reusing TCP connections (Keep-Alives)
+	// across multiple delay measurements, avoiding the overhead of repeated TCP and TLS handshakes.
+	x.httpTransport = &http.Transport{
+		TLSHandshakeTimeout: 6 * time.Second,
+		DisableKeepAlives:   false, // Keep-alives are essential for performance
+		DialContext: func(ctx context.Context, network, addr string) (net.Conn, error) {
+			dest, err := corenet.ParseDestination(fmt.Sprintf("%s:%s", network, addr))
+			if err != nil {
+				return nil, err
+			}
+			// Use the instance from the controller context
+			return core.Dial(ctx, x.coreInstance, dest)
+		},
+	}
+
+	x.httpClient = &http.Client{
+		Transport: x.httpTransport,
+		Timeout:   12 * time.Second, // Overall request timeout
+	}
+
 	log.Println("Starting core...")
 	x.IsRunning = true
 	if err := x.coreInstance.Start(); err != nil {
@@ -216,27 +267,10 @@ func (x *CoreController) doStartLoop(configContent string) error {
 	return nil
 }
 
-// measureInstDelay measures the delay for an instance to a given URL
-func measureInstDelay(ctx context.Context, inst *core.Instance, url string) (int64, error) {
-	if inst == nil {
-		return -1, errors.New("core instance is nil")
-	}
-
-	tr := &http.Transport{
-		TLSHandshakeTimeout: 6 * time.Second,
-		DisableKeepAlives:   false,
-		DialContext: func(ctx context.Context, network, addr string) (net.Conn, error) {
-			dest, err := corenet.ParseDestination(fmt.Sprintf("%s:%s", network, addr))
-			if err != nil {
-				return nil, err
-			}
-			return core.Dial(ctx, inst, dest)
-		},
-	}
-
-	client := &http.Client{
-		Transport: tr,
-		Timeout:   12 * time.Second,
+// measureInstDelay measures the delay for a given http client and URL
+func measureInstDelay(ctx context.Context, client *http.Client, url string) (int64, error) {
+	if client == nil {
+		return -1, errors.New("http client is nil")
 	}
 
 	if url == "" {
