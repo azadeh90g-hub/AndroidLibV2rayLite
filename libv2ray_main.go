@@ -25,6 +25,60 @@ import (
 	mobasset "golang.org/x/mobile/asset"
 )
 
+var (
+	// clientCache stores reusable http.Client instances for each core.Instance.
+	// Reusing clients is crucial for performance as it allows connection pooling.
+	clientCache = make(map[*core.Instance]*http.Client)
+	cacheMutex  sync.Mutex
+)
+
+// getClient retrieves a cached http.Client for a given core.Instance, or creates a new one.
+// This helps to reuse TCP connections and reduce latency.
+func getClient(inst *core.Instance) *http.Client {
+	cacheMutex.Lock()
+	defer cacheMutex.Unlock()
+
+	if client, ok := clientCache[inst]; ok {
+		return client
+	}
+
+	// Create a new transport and client if not found in cache.
+	tr := &http.Transport{
+		TLSHandshakeTimeout: 6 * time.Second,
+		DisableKeepAlives:   false,
+		DialContext: func(ctx context.Context, network, addr string) (net.Conn, error) {
+			dest, err := corenet.ParseDestination(fmt.Sprintf("%s:%s", network, addr))
+			if err != nil {
+				return nil, err
+			}
+			return core.Dial(ctx, inst, dest)
+		},
+	}
+
+	client := &http.Client{
+		Transport: tr,
+		Timeout:   12 * time.Second,
+	}
+
+	clientCache[inst] = client
+	return client
+}
+
+// removeClient removes the cached http.Client for a core.Instance and closes idle connections.
+// This should be called when a core.Instance is shut down.
+func removeClient(inst *core.Instance) {
+	cacheMutex.Lock()
+	defer cacheMutex.Unlock()
+
+	if client, ok := clientCache[inst]; ok {
+		// Close idle connections to prevent resource leaks.
+		if tr, ok := client.Transport.(*http.Transport); ok {
+			tr.CloseIdleConnections()
+		}
+		delete(clientCache, inst)
+	}
+}
+
 // Constants for environment variables
 const (
 	coreAsset = "v2ray.location.asset"
@@ -179,6 +233,8 @@ func CheckVersionX() string {
 // doShutdown shuts down the v2fly instance and cleans up resources
 func (x *CoreController) doShutdown() {
 	if x.coreInstance != nil {
+		// Clean up the cached http.Client before closing the instance.
+		removeClient(x.coreInstance)
 		if err := x.coreInstance.Close(); err != nil {
 			log.Printf("Core shutdown error: %v", err)
 		}
@@ -222,22 +278,8 @@ func measureInstDelay(ctx context.Context, inst *core.Instance, url string) (int
 		return -1, errors.New("core instance is nil")
 	}
 
-	tr := &http.Transport{
-		TLSHandshakeTimeout: 6 * time.Second,
-		DisableKeepAlives:   false,
-		DialContext: func(ctx context.Context, network, addr string) (net.Conn, error) {
-			dest, err := corenet.ParseDestination(fmt.Sprintf("%s:%s", network, addr))
-			if err != nil {
-				return nil, err
-			}
-			return core.Dial(ctx, inst, dest)
-		},
-	}
-
-	client := &http.Client{
-		Transport: tr,
-		Timeout:   12 * time.Second,
-	}
+	// Reuse http.Client for connection pooling to improve performance.
+	client := getClient(inst)
 
 	if url == "" {
 		url = "https://www.google.com/generate_204"
