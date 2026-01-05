@@ -225,6 +225,9 @@ func measureInstDelay(ctx context.Context, inst *core.Instance, url string) (int
 	tr := &http.Transport{
 		TLSHandshakeTimeout: 6 * time.Second,
 		DisableKeepAlives:   false,
+		// Set a timeout for reading the headers of the response. This helps to prevent
+		// a slow server attack where the server sends headers very slowly.
+		ReadHeaderTimeout: 6 * time.Second,
 		DialContext: func(ctx context.Context, network, addr string) (net.Conn, error) {
 			dest, err := corenet.ParseDestination(fmt.Sprintf("%s:%s", network, addr))
 			if err != nil {
