@@ -331,6 +331,8 @@ func measureRequestDelay(ctx context.Context, client *http.Client, url string) (
 		}
 
 		success = true
+		// Optimization: exit after the first successful measurement to avoid unnecessary retries.
+		break
 	}
 	if !success {
 		return -1, lastErr
