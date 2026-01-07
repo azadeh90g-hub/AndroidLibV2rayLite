@@ -270,72 +270,103 @@ func measureInstDelay(ctx context.Context, inst *core.Instance, url string) (int
 	return measureRequestDelay(ctx, client, url)
 }
 
+// pingResult holds the outcome of a single latency check.
+type pingResult struct {
+	duration int64
+	err      error
+}
+
 // measureRequestDelay performs the actual HTTP request and delay measurement.
-// It is designed to be reusable with different http.Client instances.
+// To improve reliability and speed, it races multiple geographically distributed
+// endpoints and returns the latency of the first successful response.
+// This approach avoids reliance on a single endpoint, which may be slow or unavailable.
 func measureRequestDelay(ctx context.Context, client *http.Client, url string) (int64, error) {
-	if url == "" {
-		url = "https://www.google.com/generate_204"
+	// A set of reliable, geographically diverse endpoints for latency checking.
+	// Using multiple endpoints makes the check faster and more robust, as it's not
+	// dependent on the availability or performance of a single server.
+	urls := []string{
+		"https://www.google.com/generate_204",
+		"http://detectportal.firefox.com/success.txt",
+		"https://www.cloudflare.com/cdn-cgi/trace",
 	}
 
-	req, err := http.NewRequestWithContext(ctx, "GET", url, nil)
-	if err != nil {
-		return -1, fmt.Errorf("failed to create HTTP request: %w", err)
+	// If a specific URL is provided by the caller, use only that one.
+	if url != "" {
+		urls = []string{url}
 	}
 
-	var minDuration int64 = -1
-	success := false
-	var lastErr error
+	// Create a context that will be canceled as soon as the first goroutine succeeds.
+	raceCtx, cancel := context.WithCancel(ctx)
+	defer cancel() // Ensure resources are cleaned up.
 
-	// Add exception handling and increase retry attempts
-	const attempts = 2
-	for i := 0; i < attempts; i++ {
+	// A channel to collect results from all racers.
+	resultsChan := make(chan pingResult, len(urls))
+
+	for _, u := range urls {
+		go func(targetURL string) {
+			// This goroutine will send exactly one result to the channel.
+			req, err := http.NewRequestWithContext(raceCtx, "GET", targetURL, nil)
+			if err != nil {
+				resultsChan <- pingResult{err: err}
+				return
+			}
+
+			start := time.Now()
+			resp, err := client.Do(req)
+			if err != nil {
+				resultsChan <- pingResult{err: err}
+				return
+			}
+			defer resp.Body.Close()
+
+			// The response body must be read to completion to allow connection reuse.
+			_, ioErr := io.Copy(io.Discard, resp.Body)
+
+			if resp.StatusCode != http.StatusOK && resp.StatusCode != http.StatusNoContent {
+				resultsChan <- pingResult{err: fmt.Errorf("invalid status for %s: %s", targetURL, resp.Status)}
+				return
+			}
+
+			if ioErr != nil {
+				resultsChan <- pingResult{err: fmt.Errorf("failed to read body from %s: %w", targetURL, ioErr)}
+				return
+			}
+
+			resultsChan <- pingResult{duration: time.Since(start).Milliseconds()}
+		}(u)
+	}
+
+	var firstErr error
+	for i := 0; i < len(urls); i++ {
 		select {
+		case res := <-resultsChan:
+			if res.err == nil {
+				// Got a successful result. We can return immediately.
+				// The defer cancel() will clean up other goroutines.
+				return res.duration, nil
+			}
+			// Keep the first error encountered, in case all requests fail.
+			if firstErr == nil {
+				firstErr = res.err
+			}
 		case <-ctx.Done():
-			// Return immediately when context is canceled
-			if !success {
-				return -1, ctx.Err()
+			// The parent context was cancelled (e.g., timeout).
+			// We return the parent context's error, but preference any
+			// specific error we might have already received.
+			if firstErr != nil {
+				return -1, fmt.Errorf("delay test cancelled: %w (first error: %v)", ctx.Err(), firstErr)
 			}
-			return minDuration, nil
-		default:
-			// Continue execution
+			return -1, ctx.Err()
 		}
-
-		start := time.Now()
-		resp, err := client.Do(req)
-		if err != nil {
-			lastErr = err
-			continue
-		}
-
-		// Ensure response body is closed
-		defer func(resp *http.Response) {
-			if resp != nil && resp.Body != nil {
-				resp.Body.Close()
-			}
-		}(resp)
-
-		if resp.StatusCode != http.StatusOK && resp.StatusCode != http.StatusNoContent {
-			lastErr = fmt.Errorf("invalid status: %s", resp.Status)
-			continue
-		}
-
-		// Handle possible errors when reading response body
-		if _, err := io.Copy(io.Discard, resp.Body); err != nil {
-			lastErr = fmt.Errorf("failed to read response body: %w", err)
-			continue
-		}
-
-		duration := time.Since(start).Milliseconds()
-		if !success || duration < minDuration {
-			minDuration = duration
-		}
-
-		success = true
 	}
-	if !success {
-		return -1, lastErr
+
+	// If we've looped through all results and none were successful.
+	if firstErr != nil {
+		return -1, firstErr
 	}
-	return minDuration, nil
+
+	// This case should be rare, but it's possible if all goroutines fail without sending an error.
+	return -1, errors.New("all latency checks failed")
 }
 
 // Log writer implementation
