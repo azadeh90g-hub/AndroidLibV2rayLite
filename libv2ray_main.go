@@ -125,14 +125,24 @@ func (x *CoreController) StopLoop() error {
 	return nil
 }
 
-// QueryStats retrieves and resets traffic statistics for a specific outbound tag and direction
-// Returns the accumulated traffic value and resets the counter to zero
-// Returns 0 if the stats manager is not initialized or the counter doesn't exist
+// QueryStats retrieves and resets traffic statistics for a specific outbound tag and direction.
+// It uses a strings.Builder for efficient key construction, which is faster than fmt.Sprintf
+// and reduces memory allocations, making it ideal for performance-sensitive, high-frequency calls.
 func (x *CoreController) QueryStats(tag string, direct string) int64 {
 	if x.statsManager == nil {
 		return 0
 	}
-	counter := x.statsManager.GetCounter(fmt.Sprintf("outbound>>>%s>>>traffic>>>%s", tag, direct))
+
+	// Using strings.Builder is more performant than fmt.Sprintf for simple concatenations.
+	// It avoids the overhead of reflection and format string parsing.
+	var sb strings.Builder
+	sb.WriteString("outbound>>>")
+	sb.WriteString(tag)
+	sb.WriteString(">>>traffic>>>")
+	sb.WriteString(direct)
+	counterKey := sb.String()
+
+	counter := x.statsManager.GetCounter(counterKey)
 	if counter == nil {
 		return 0
 	}
