@@ -71,11 +71,23 @@ func InitCoreEnv(envPath string, key string) {
 
 	// Custom file reader with path validation
 	corefilesystem.NewFileReader = func(path string) (io.ReadCloser, error) {
-		if _, err := os.Stat(path); os.IsNotExist(err) {
-			_, file := filepath.Split(path)
+		// Security: Sanitize the file path to prevent path traversal attacks.
+		// filepath.Clean resolves ".." and ensures the path is in its simplest form.
+		cleanPath := filepath.Clean(path)
+
+		// Security: Block absolute paths and paths that try to traverse upwards.
+		// This ensures that file access is restricted to the current working directory and its subdirectories.
+		if filepath.IsAbs(cleanPath) || strings.HasPrefix(cleanPath, "..") {
+			return nil, fmt.Errorf("unsafe file path detected: %s", path)
+		}
+
+		if _, err := os.Stat(cleanPath); os.IsNotExist(err) {
+			// Fallback to mobile assets if the file doesn't exist on the filesystem.
+			_, file := filepath.Split(cleanPath)
 			return mobasset.Open(file)
 		}
-		return os.Open(path)
+		// Open the sanitized file path.
+		return os.Open(cleanPath)
 	}
 }
 
