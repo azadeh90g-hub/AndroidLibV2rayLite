@@ -320,7 +320,8 @@ func measureRequestDelay(ctx context.Context, client *http.Client, url string) (
 		}
 
 		// Handle possible errors when reading response body
-		if _, err := io.Copy(io.Discard, resp.Body); err != nil {
+		// Limit the response body to 5MB to prevent DoS attacks
+		if _, err := io.Copy(io.Discard, io.LimitReader(resp.Body, 5*1024*1024)); err != nil {
 			lastErr = fmt.Errorf("failed to read response body: %w", err)
 			continue
 		}
