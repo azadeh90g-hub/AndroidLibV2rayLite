@@ -307,21 +307,22 @@ func measureRequestDelay(ctx context.Context, client *http.Client, url string) (
 			continue
 		}
 
-		// Ensure response body is closed
-		defer func(resp *http.Response) {
-			if resp != nil && resp.Body != nil {
+		// ⚡ Bolt: Using defer in a loop can lead to resource leaks because the
+		// deferred call is only executed when the function returns. By explicitly
+		// closing the response body within each iteration, we ensure that resources
+		// are released immediately, improving performance and stability.
+		if resp.Body != nil {
+			// Handle possible errors when reading response body
+			if _, err := io.Copy(io.Discard, resp.Body); err != nil {
+				lastErr = fmt.Errorf("failed to read response body: %w", err)
 				resp.Body.Close()
+				continue
 			}
-		}(resp)
+			resp.Body.Close()
+		}
 
 		if resp.StatusCode != http.StatusOK && resp.StatusCode != http.StatusNoContent {
 			lastErr = fmt.Errorf("invalid status: %s", resp.Status)
-			continue
-		}
-
-		// Handle possible errors when reading response body
-		if _, err := io.Copy(io.Discard, resp.Body); err != nil {
-			lastErr = fmt.Errorf("failed to read response body: %w", err)
 			continue
 		}
 
