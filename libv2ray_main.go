@@ -120,7 +120,7 @@ func (x *CoreController) StopLoop() error {
 
 	if x.IsRunning {
 		x.doShutdown()
-		x.CallbackHandler.OnEmitStatus(0, "Core stopped")
+		x.CallbackHandler.OnEmitStatus(0, "Service has stopped")
 	}
 	return nil
 }
@@ -238,7 +238,7 @@ func (x *CoreController) doStartLoop(configContent string) error {
 	}
 
 	x.CallbackHandler.Startup()
-	x.CallbackHandler.OnEmitStatus(0, "Started successfully, running")
+	x.CallbackHandler.OnEmitStatus(0, "Service is running")
 
 	log.Println("Core started successfully")
 	return nil
