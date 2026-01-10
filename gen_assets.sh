@@ -21,11 +21,37 @@ check_dependencies() {
 
 # Download data function
 download_dat() {
-    echo "Downloading geoip.dat..."
-    curl -sL https://github.com/Loyalsoldier/v2ray-rules-dat/releases/latest/download/geoip.dat -o "$DATADIR/geoip.dat"
+    echo "Fetching latest release information..."
+    LATEST_RELEASE=$(curl -sL "https://api.github.com/repos/Loyalsoldier/v2ray-rules-dat/releases/latest")
 
-    echo "Downloading geosite.dat..."
-    curl -sL https://github.com/Loyalsoldier/v2ray-rules-dat/releases/latest/download/geosite.dat -o "$DATADIR/geosite.dat"
+    ASSETS=$(echo "$LATEST_RELEASE" | jq -r '.assets[] | {name, browser_download_url} | @base64')
+
+    TMPDIR=$(mktemp -d)
+    trap 'rm -rf -- "$TMPDIR"' EXIT
+
+    for ASSET in $ASSETS; do
+        DECODED_ASSET=$(echo "$ASSET" | base64 -d)
+        NAME=$(echo "$DECODED_ASSET" | jq -r '.name')
+        URL=$(echo "$DECODED_ASSET" | jq -r '.browser_download_url')
+
+        if [[ "$NAME" == "geoip.dat" || "$NAME" == "geosite.dat" || "$NAME" == "geoip.dat.sha256sum" || "$NAME" == "geosite.dat.sha256sum" ]]; then
+            echo "Downloading $NAME..."
+            curl -sL "$URL" -o "$TMPDIR/$NAME"
+        fi
+    done
+
+    echo "Verifying checksums..."
+    (
+        cd "$TMPDIR"
+        sha256sum -c --strict geoip.dat.sha256sum
+        sha256sum -c --strict geosite.dat.sha256sum
+    )
+
+    echo "Moving assets to $DATADIR..."
+    mv "$TMPDIR/geoip.dat" "$DATADIR/geoip.dat"
+    mv "$TMPDIR/geosite.dat" "$DATADIR/geosite.dat"
+
+    echo "Download and verification complete."
 }
 
 # Main execution logic
