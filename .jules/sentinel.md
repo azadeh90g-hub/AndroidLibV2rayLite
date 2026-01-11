@@ -1,0 +1,4 @@
+## 2024-09-05 - Unvalidated URL Input Leading to Potential SSRF
+**Vulnerability:** A function `measureRequestDelay` accepted a raw URL string and made an HTTP request without validating the URL's scheme. This could allow an attacker to pass URLs with schemes like `file://` or `ftp://`, potentially leading to Server-Side Request Forgery (SSRF) to probe the local network or access local files.
+**Learning:** The vulnerability existed because the function implicitly trusted that the input URL would always be an HTTP/HTTPS endpoint. The focus was on measuring network delay, and the security implication of a malicious URL was overlooked.
+**Prevention:** Always parse and validate URL inputs from external or untrusted sources. Explicitly check for allowed schemes (e.g., `http`, `https`) before using the URL to make a network request. Treat all inputs as untrusted until validated.
