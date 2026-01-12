@@ -8,6 +8,7 @@ import (
 	"log"
 	"net"
 	"net/http"
+	"net/url"
 	"os"
 	"path/filepath"
 	"strings"
@@ -272,12 +273,26 @@ func measureInstDelay(ctx context.Context, inst *core.Instance, url string) (int
 
 // measureRequestDelay performs the actual HTTP request and delay measurement.
 // It is designed to be reusable with different http.Client instances.
-func measureRequestDelay(ctx context.Context, client *http.Client, url string) (int64, error) {
-	if url == "" {
-		url = "https://www.google.com/generate_204"
+func measureRequestDelay(ctx context.Context, client *http.Client, rawURL string) (int64, error) {
+	if rawURL == "" {
+		rawURL = "https://www.google.com/generate_204"
 	}
 
-	req, err := http.NewRequestWithContext(ctx, "GET", url, nil)
+	// Security: Validate the URL to prevent SSRF attacks.
+	parsedURL, err := url.Parse(rawURL)
+	if err != nil {
+		return -1, fmt.Errorf("invalid URL: %w", err)
+	}
+
+	// Security: Check if the destination is a private or local IP address.
+	valid, err := isValidDestination(parsedURL)
+	if err != nil {
+		return -1, fmt.Errorf("failed to validate destination: %w", err)
+	}
+	if !valid {
+		return -1, errors.New("destination is a private or local address")
+	}
+	req, err := http.NewRequestWithContext(ctx, "GET", rawURL, nil)
 	if err != nil {
 		return -1, fmt.Errorf("failed to create HTTP request: %w", err)
 	}
@@ -336,6 +351,53 @@ func measureRequestDelay(ctx context.Context, client *http.Client, url string) (
 		return -1, lastErr
 	}
 	return minDuration, nil
+}
+
+// isValidDestination checks if the URL resolves to a private or local IP address.
+// This is a security measure to prevent Server-Side Request Forgery (SSRF) attacks.
+func isValidDestination(u *url.URL) (bool, error) {
+	hostname := u.Hostname()
+	if ip := net.ParseIP(hostname); ip != nil {
+		// Direct IP address in URL
+		return !isPrivateIP(ip), nil
+	}
+
+	// Resolve hostname to IP addresses
+	ips, err := net.LookupIP(hostname)
+	if err != nil {
+		return false, fmt.Errorf("failed to resolve hostname '%s': %w", hostname, err)
+	}
+
+	for _, ip := range ips {
+		if isPrivateIP(ip) {
+			return false, nil // Found a private IP, so the destination is invalid
+		}
+	}
+
+	return true, nil // No private IPs found
+}
+
+// isPrivateIP checks if a given IP address is in a private range.
+func isPrivateIP(ip net.IP) bool {
+	if ip.IsLoopback() || ip.IsLinkLocalUnicast() || ip.IsLinkLocalMulticast() {
+		return true
+	}
+
+	// IPv4 private ranges
+	privateIPv4Ranges := []string{
+		"10.0.0.0/8",
+		"172.16.0.0/12",
+		"192.168.0.0/16",
+	}
+
+	for _, cidr := range privateIPv4Ranges {
+		_, ipNet, err := net.ParseCIDR(cidr)
+		if err == nil && ipNet.Contains(ip) {
+			return true
+		}
+	}
+
+	return false
 }
 
 // Log writer implementation
