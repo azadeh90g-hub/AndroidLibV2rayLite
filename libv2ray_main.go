@@ -283,8 +283,8 @@ func measureRequestDelay(ctx context.Context, client *http.Client, url string) (
 	}
 
 	var minDuration int64 = -1
-	success := false
 	var lastErr error
+	success := false
 
 	// Add exception handling and increase retry attempts
 	const attempts = 2
@@ -307,21 +307,22 @@ func measureRequestDelay(ctx context.Context, client *http.Client, url string) (
 			continue
 		}
 
-		// Ensure response body is closed
-		defer func(resp *http.Response) {
-			if resp != nil && resp.Body != nil {
-				resp.Body.Close()
+		// Corrected Resource Handling:
+		// Explicitly close the response body in each iteration to prevent resource leaks.
+		// Using 'defer' in a loop is an anti-pattern as it would delay the closing until the function exits.
+		if resp.Body != nil {
+			// Drain the body to allow the connection to be reused.
+			_, copyErr := io.Copy(io.Discard, resp.Body)
+			resp.Body.Close() // Close the body regardless of copy error.
+
+			if copyErr != nil {
+				lastErr = fmt.Errorf("failed to read response body: %w", copyErr)
+				continue
 			}
-		}(resp)
+		}
 
 		if resp.StatusCode != http.StatusOK && resp.StatusCode != http.StatusNoContent {
 			lastErr = fmt.Errorf("invalid status: %s", resp.Status)
-			continue
-		}
-
-		// Handle possible errors when reading response body
-		if _, err := io.Copy(io.Discard, resp.Body); err != nil {
-			lastErr = fmt.Errorf("failed to read response body: %w", err)
 			continue
 		}
 
@@ -329,9 +330,9 @@ func measureRequestDelay(ctx context.Context, client *http.Client, url string) (
 		if !success || duration < minDuration {
 			minDuration = duration
 		}
-
 		success = true
 	}
+
 	if !success {
 		return -1, lastErr
 	}
