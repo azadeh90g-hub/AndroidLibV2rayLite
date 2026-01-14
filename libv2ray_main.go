@@ -66,7 +66,13 @@ func setEnvVariable(key, value string) {
 func InitCoreEnv(envPath string, key string) {
 	// Set asset/cert paths
 	if len(envPath) > 0 {
-		setEnvVariable(coreAsset, envPath)
+		// Security: Sanitize envPath to prevent path traversal attacks by ensuring it's an absolute path.
+		absPath, err := filepath.Abs(envPath)
+		if err != nil {
+			log.Printf("Security: Failed to get absolute path for envPath '%s': %v", envPath, err)
+			return // Do not proceed with a potentially malformed path
+		}
+		setEnvVariable(coreAsset, absPath)
 	}
 
 	// Custom file reader with path validation
