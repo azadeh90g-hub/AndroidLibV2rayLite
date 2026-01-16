@@ -69,13 +69,32 @@ func InitCoreEnv(envPath string, key string) {
 		setEnvVariable(coreAsset, envPath)
 	}
 
-	// Custom file reader with path validation
+	// Custom file reader with enhanced path validation to prevent traversal attacks
 	corefilesystem.NewFileReader = func(path string) (io.ReadCloser, error) {
-		if _, err := os.Stat(path); os.IsNotExist(err) {
-			_, file := filepath.Split(path)
+		// Clean the path to resolve redundant separators and ".." elements.
+		cleanedPath := filepath.Clean(path)
+
+		// Security Check 1: Forbid absolute paths to prevent access to arbitrary system files.
+		if filepath.IsAbs(cleanedPath) {
+			return nil, fmt.Errorf("security: absolute path access is forbidden: %s", path)
+		}
+
+		// Security Check 2: Ensure the cleaned path does not start with ".." to prevent
+		// escaping the current directory. This is a critical check after cleaning the path.
+		if strings.HasPrefix(cleanedPath, ".."+string(os.PathSeparator)) || cleanedPath == ".." {
+			return nil, fmt.Errorf("security: path traversal attempt detected: %s", path)
+		}
+
+		// Attempt to access the file using the sanitized path.
+		if _, err := os.Stat(cleanedPath); os.IsNotExist(err) {
+			// If file does not exist, fall back to mobile assets, using only the filename.
+			// This is consistent with the original logic but safer.
+			_, file := filepath.Split(cleanedPath)
 			return mobasset.Open(file)
 		}
-		return os.Open(path)
+
+		// Open the file from the regular filesystem if it exists.
+		return os.Open(cleanedPath)
 	}
 }
 
