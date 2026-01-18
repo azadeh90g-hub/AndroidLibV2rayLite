@@ -2,6 +2,7 @@ package libv2ray
 
 import (
 	"context"
+	"crypto/tls"
 	"errors"
 	"fmt"
 	"io"
@@ -217,6 +218,7 @@ func (x *CoreController) doStartLoop(configContent string) error {
 	// Create a reusable HTTP client to optimize performance by reusing connections.
 	x.httpClient = &http.Client{
 		Transport: &http.Transport{
+			TLSClientConfig:     &tls.Config{MinVersion: tls.VersionTLS12},
 			TLSHandshakeTimeout: 6 * time.Second,
 			DisableKeepAlives:   false,
 			DialContext: func(ctx context.Context, network, addr string) (net.Conn, error) {
@@ -251,6 +253,7 @@ func measureInstDelay(ctx context.Context, inst *core.Instance, url string) (int
 	}
 
 	tr := &http.Transport{
+		TLSClientConfig:     &tls.Config{MinVersion: tls.VersionTLS12},
 		TLSHandshakeTimeout: 6 * time.Second,
 		DisableKeepAlives:   false,
 		DialContext: func(ctx context.Context, network, addr string) (net.Conn, error) {
