@@ -307,21 +307,25 @@ func measureRequestDelay(ctx context.Context, client *http.Client, url string) (
 			continue
 		}
 
-		// Ensure response body is closed
-		defer func(resp *http.Response) {
-			if resp != nil && resp.Body != nil {
-				resp.Body.Close()
+		// Optimization: To enable HTTP Keep-Alive and reuse the TCP connection,
+		// the response body must be fully read and then closed. The original
+		// implementation used a `defer` inside the loop, which would not
+		// execute until the function returned, preventing connection reuse.
+		// By handling the body within the loop, we ensure the connection
+		// is ready for the next attempt.
+		if resp.Body != nil {
+			// We must read the body to completion and close it.
+			_, copyErr := io.Copy(io.Discard, resp.Body)
+			resp.Body.Close()
+
+			if copyErr != nil {
+				lastErr = fmt.Errorf("failed to read response body: %w", copyErr)
+				continue
 			}
-		}(resp)
+		}
 
 		if resp.StatusCode != http.StatusOK && resp.StatusCode != http.StatusNoContent {
 			lastErr = fmt.Errorf("invalid status: %s", resp.Status)
-			continue
-		}
-
-		// Handle possible errors when reading response body
-		if _, err := io.Copy(io.Discard, resp.Body); err != nil {
-			lastErr = fmt.Errorf("failed to read response body: %w", err)
 			continue
 		}
 
