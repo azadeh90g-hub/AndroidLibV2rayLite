@@ -71,11 +71,17 @@ func InitCoreEnv(envPath string, key string) {
 
 	// Custom file reader with path validation
 	corefilesystem.NewFileReader = func(path string) (io.ReadCloser, error) {
-		if _, err := os.Stat(path); os.IsNotExist(err) {
-			_, file := filepath.Split(path)
+		// Sanitize file path to prevent path traversal attacks.
+		cleanedPath := filepath.Clean(path)
+		if filepath.IsAbs(cleanedPath) || strings.HasPrefix(cleanedPath, ".."+string(os.PathSeparator)) || cleanedPath == ".." {
+			return nil, fmt.Errorf("disallowed path: %s", path)
+		}
+
+		if _, err := os.Stat(cleanedPath); os.IsNotExist(err) {
+			_, file := filepath.Split(cleanedPath)
 			return mobasset.Open(file)
 		}
-		return os.Open(path)
+		return os.Open(cleanedPath)
 	}
 }
 
