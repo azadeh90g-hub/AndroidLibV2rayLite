@@ -21,11 +21,16 @@ check_dependencies() {
 
 # Download data function
 download_dat() {
+    mkdir -p "$DATADIR"
+    # Optimization: Download files in parallel to reduce asset generation time.
+    # By running both curl commands in the background and waiting for them to finish,
+    # we can nearly halve the time it takes to download these assets.
     echo "Downloading geoip.dat..."
-    curl -sL https://github.com/Loyalsoldier/v2ray-rules-dat/releases/latest/download/geoip.dat -o "$DATADIR/geoip.dat"
+    curl -sL https://github.com/Loyalsoldier/v2ray-rules-dat/releases/latest/download/geoip.dat -o "$DATADIR/geoip.dat" &
 
     echo "Downloading geosite.dat..."
-    curl -sL https://github.com/Loyalsoldier/v2ray-rules-dat/releases/latest/download/geosite.dat -o "$DATADIR/geosite.dat"
+    curl -sL https://github.com/Loyalsoldier/v2ray-rules-dat/releases/latest/download/geosite.dat -o "$DATADIR/geosite.dat" &
+    wait
 }
 
 # Main execution logic
