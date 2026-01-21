@@ -307,30 +307,32 @@ func measureRequestDelay(ctx context.Context, client *http.Client, url string) (
 			continue
 		}
 
-		// Ensure response body is closed
-		defer func(resp *http.Response) {
-			if resp != nil && resp.Body != nil {
-				resp.Body.Close()
+		// Using a closure to scope the defer, ensuring resp.Body.Close() is called
+		// at the end of each loop iteration. This is critical for connection reuse.
+		func() {
+			if resp.Body != nil {
+				defer resp.Body.Close()
 			}
-		}(resp)
 
-		if resp.StatusCode != http.StatusOK && resp.StatusCode != http.StatusNoContent {
-			lastErr = fmt.Errorf("invalid status: %s", resp.Status)
-			continue
-		}
+			if resp.StatusCode != http.StatusOK && resp.StatusCode != http.StatusNoContent {
+				lastErr = fmt.Errorf("invalid status: %s", resp.Status)
+				return // Skips to next iteration
+			}
 
-		// Handle possible errors when reading response body
-		if _, err := io.Copy(io.Discard, resp.Body); err != nil {
-			lastErr = fmt.Errorf("failed to read response body: %w", err)
-			continue
-		}
+			// Must read body to completion for connection reuse.
+			if _, err := io.Copy(io.Discard, resp.Body); err != nil {
+				lastErr = fmt.Errorf("failed to read response body: %w", err)
+				return // Skips to next iteration
+			}
 
-		duration := time.Since(start).Milliseconds()
-		if !success || duration < minDuration {
-			minDuration = duration
-		}
+			duration := time.Since(start).Milliseconds()
+			if !success || duration < minDuration {
+				minDuration = duration
+			}
+			success = true
+		}()
 
-		success = true
+		}()
 	}
 	if !success {
 		return -1, lastErr
