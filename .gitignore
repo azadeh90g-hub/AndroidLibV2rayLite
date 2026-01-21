@@ -39,3 +39,6 @@ libv2ray*.[a|j]ar
 
 # Ignore configuration files
 conf/demo/
+
+# Ignore generated data assets
+data/
