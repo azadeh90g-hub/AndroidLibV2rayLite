@@ -22,10 +22,10 @@ check_dependencies() {
 # Download data function
 download_dat() {
     echo "Downloading geoip.dat..."
-    curl -sL https://github.com/Loyalsoldier/v2ray-rules-dat/releases/latest/download/geoip.dat -o "$DATADIR/geoip.dat"
+    curl -#L https://github.com/Loyalsoldier/v2ray-rules-dat/releases/latest/download/geoip.dat -o "$DATADIR/geoip.dat"
 
     echo "Downloading geosite.dat..."
-    curl -sL https://github.com/Loyalsoldier/v2ray-rules-dat/releases/latest/download/geosite.dat -o "$DATADIR/geosite.dat"
+    curl -#L https://github.com/Loyalsoldier/v2ray-rules-dat/releases/latest/download/geosite.dat -o "$DATADIR/geosite.dat"
 }
 
 # Main execution logic
