@@ -64,9 +64,12 @@ func setEnvVariable(key, value string) {
 // It sets up asset path, certificate path, XUDP base key and customizes the file reader
 // to support Android asset system
 func InitCoreEnv(envPath string, key string) {
+	// Sanitize the envPath to prevent path traversal attacks
+	cleanEnvPath := filepath.Clean(envPath)
+
 	// Set asset/cert paths
-	if len(envPath) > 0 {
-		setEnvVariable(coreAsset, envPath)
+	if len(cleanEnvPath) > 0 {
+		setEnvVariable(coreAsset, cleanEnvPath)
 	}
 
 	// Custom file reader with path validation
