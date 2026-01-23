@@ -300,37 +300,34 @@ func measureRequestDelay(ctx context.Context, client *http.Client, url string) (
 			// Continue execution
 		}
 
-		start := time.Now()
-		resp, err := client.Do(req)
+		// Wrap the request in a function to ensure resp.Body is closed at the end of each iteration.
+		err := func() error {
+			start := time.Now()
+			resp, err := client.Do(req)
+			if err != nil {
+				return err
+			}
+			defer resp.Body.Close()
+
+			if resp.StatusCode != http.StatusOK && resp.StatusCode != http.StatusNoContent {
+				return fmt.Errorf("invalid status: %s", resp.Status)
+			}
+
+			if _, err := io.Copy(io.Discard, resp.Body); err != nil {
+				return fmt.Errorf("failed to read response body: %w", err)
+			}
+
+			duration := time.Since(start).Milliseconds()
+			if !success || duration < minDuration {
+				minDuration = duration
+			}
+			success = true
+			return nil
+		}()
+
 		if err != nil {
 			lastErr = err
-			continue
 		}
-
-		// Ensure response body is closed
-		defer func(resp *http.Response) {
-			if resp != nil && resp.Body != nil {
-				resp.Body.Close()
-			}
-		}(resp)
-
-		if resp.StatusCode != http.StatusOK && resp.StatusCode != http.StatusNoContent {
-			lastErr = fmt.Errorf("invalid status: %s", resp.Status)
-			continue
-		}
-
-		// Handle possible errors when reading response body
-		if _, err := io.Copy(io.Discard, resp.Body); err != nil {
-			lastErr = fmt.Errorf("failed to read response body: %w", err)
-			continue
-		}
-
-		duration := time.Since(start).Milliseconds()
-		if !success || duration < minDuration {
-			minDuration = duration
-		}
-
-		success = true
 	}
 	if !success {
 		return -1, lastErr
