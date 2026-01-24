@@ -300,38 +300,40 @@ func measureRequestDelay(ctx context.Context, client *http.Client, url string) (
 			// Continue execution
 		}
 
-		start := time.Now()
-		resp, err := client.Do(req)
+		// Using an anonymous function to scope the defer statement correctly.
+		// This ensures that the response body is closed after each iteration,
+		// preventing resource leaks.
+		err := func() error {
+			start := time.Now()
+			resp, err := client.Do(req)
+			if err != nil {
+				return err
+			}
+			defer resp.Body.Close()
+
+			if resp.StatusCode != http.StatusOK && resp.StatusCode != http.StatusNoContent {
+				return fmt.Errorf("invalid status: %s", resp.Status)
+			}
+
+			// Reading the body to completion and discarding it is important
+			// for connection reuse.
+			if _, err := io.Copy(io.Discard, resp.Body); err != nil {
+				return fmt.Errorf("failed to read response body: %w", err)
+			}
+
+			duration := time.Since(start).Milliseconds()
+			if !success || duration < minDuration {
+				minDuration = duration
+			}
+			success = true
+			return nil
+		}()
 		if err != nil {
 			lastErr = err
 			continue
 		}
-
-		// Ensure response body is closed
-		defer func(resp *http.Response) {
-			if resp != nil && resp.Body != nil {
-				resp.Body.Close()
-			}
-		}(resp)
-
-		if resp.StatusCode != http.StatusOK && resp.StatusCode != http.StatusNoContent {
-			lastErr = fmt.Errorf("invalid status: %s", resp.Status)
-			continue
-		}
-
-		// Handle possible errors when reading response body
-		if _, err := io.Copy(io.Discard, resp.Body); err != nil {
-			lastErr = fmt.Errorf("failed to read response body: %w", err)
-			continue
-		}
-
-		duration := time.Since(start).Milliseconds()
-		if !success || duration < minDuration {
-			minDuration = duration
-		}
-
-		success = true
 	}
+
 	if !success {
 		return -1, lastErr
 	}
