@@ -66,7 +66,11 @@ func setEnvVariable(key, value string) {
 func InitCoreEnv(envPath string, key string) {
 	// Set asset/cert paths
 	if len(envPath) > 0 {
-		setEnvVariable(coreAsset, envPath)
+		// Sanitize the envPath to harden against path traversal vulnerabilities.
+		// By cleaning the path, we ensure that any malicious input attempting
+		// to navigate the file system (e.g., using "../") is resolved to a
+		// safe, canonical path.
+		setEnvVariable(coreAsset, filepath.Clean(envPath))
 	}
 
 	// Custom file reader with path validation
