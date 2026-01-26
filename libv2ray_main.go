@@ -66,7 +66,48 @@ func setEnvVariable(key, value string) {
 func InitCoreEnv(envPath string, key string) {
 	// Set asset/cert paths
 	if len(envPath) > 0 {
-		setEnvVariable(coreAsset, envPath)
+		// 🛡️ Sentinel: Final, non-breaking, opt-in path traversal hardening.
+		// This security model is disabled by default to avoid breaking changes.
+		// To enable it, set the V2RAY_SAFE_ASSET_PATH environment variable to a
+		// trusted base directory for your assets.
+		safeAssetPath := os.Getenv("V2RAY_SAFE_ASSET_PATH")
+
+		if safeAssetPath == "" {
+			// Legacy mode for backward compatibility.
+			log.Printf("Security warning: V2RAY_SAFE_ASSET_PATH is not set. The provided asset path ('%s') is not validated, which is a security risk. For enhanced security, set this environment variable to a trusted base directory.", envPath)
+			setEnvVariable(coreAsset, envPath)
+		} else {
+			// Secure mode: Validate the path against the trusted base directory.
+			realPath, err := filepath.Abs(envPath)
+			if err != nil {
+				log.Printf("Security check FAILED: Could not resolve absolute path for '%s': %v", envPath, err)
+				return
+			}
+			realPath, err = filepath.EvalSymlinks(realPath)
+			if err != nil {
+				log.Printf("Security check FAILED: Could not resolve symlinks for '%s': %v", envPath, err)
+				return
+			}
+
+			trustedBase, err := filepath.Abs(safeAssetPath)
+			if err != nil {
+				log.Printf("Security check CRITICAL: Could not resolve absolute path for V2RAY_SAFE_ASSET_PATH ('%s'): %v", safeAssetPath, err)
+				return
+			}
+			trustedBase, err = filepath.EvalSymlinks(trustedBase)
+			if err != nil {
+				log.Printf("Security check CRITICAL: Could not resolve symlinks for V2RAY_SAFE_ASSET_PATH ('%s'): %v", safeAssetPath, err)
+				return
+			}
+
+			if !strings.HasPrefix(realPath, trustedBase) {
+				log.Printf("SECURITY ALERT: Blocked potential path traversal attack. The path '%s' is outside the trusted directory '%s'.", realPath, trustedBase)
+				return
+			}
+
+			log.Printf("Security check PASSED: Asset path '%s' is within the trusted directory.", realPath)
+			setEnvVariable(coreAsset, realPath)
+		}
 	}
 
 	// Custom file reader with path validation
