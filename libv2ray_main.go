@@ -307,21 +307,27 @@ func measureRequestDelay(ctx context.Context, client *http.Client, url string) (
 			continue
 		}
 
-		// Ensure response body is closed
-		defer func(resp *http.Response) {
+		if err != nil {
+			lastErr = err
 			if resp != nil && resp.Body != nil {
 				resp.Body.Close()
 			}
-		}(resp)
+			continue
+		}
 
+		// Ensure response body is closed in all cases before the next iteration
 		if resp.StatusCode != http.StatusOK && resp.StatusCode != http.StatusNoContent {
 			lastErr = fmt.Errorf("invalid status: %s", resp.Status)
+			resp.Body.Close()
 			continue
 		}
 
 		// Handle possible errors when reading response body
-		if _, err := io.Copy(io.Discard, resp.Body); err != nil {
-			lastErr = fmt.Errorf("failed to read response body: %w", err)
+		// It's critical to close the body on all paths, including the success path
+		_, errRead := io.Copy(io.Discard, resp.Body)
+		resp.Body.Close()
+		if errRead != nil {
+			lastErr = fmt.Errorf("failed to read response body: %w", errRead)
 			continue
 		}
 

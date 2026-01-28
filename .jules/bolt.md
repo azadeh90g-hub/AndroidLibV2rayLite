@@ -1,1 +1,3 @@
-BOLT'S JOURNAL - CRITICAL LEARNINGS ONLY:
+## 2024-07-17 - The Defer-in-a-Loop Pitfall
+**Learning:** When refactoring a `defer` statement out of a loop in Go, it is absolutely critical to ensure that the resource cleanup function (e.g., `resp.Body.Close()`) is explicitly called on *every single execution path* within that loop. I repeatedly failed because I only handled the error paths and forgot the success path, leading to a persistent resource leak. The original `defer` was safer, if less performant, because it guaranteed cleanup. My initial "fixes" were actually regressions.
+**Action:** In the future, whenever I remove a `defer` from a loop, I will meticulously trace every possible exit point of the loop (`continue`, `break`, and successful completion) and add the cleanup call to each one. I will treat a missing cleanup on any path as a critical bug.
