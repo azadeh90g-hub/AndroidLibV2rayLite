@@ -66,7 +66,8 @@ func setEnvVariable(key, value string) {
 func InitCoreEnv(envPath string, key string) {
 	// Set asset/cert paths
 	if len(envPath) > 0 {
-		setEnvVariable(coreAsset, envPath)
+		cleanPath := filepath.Clean(envPath)
+		setEnvVariable(coreAsset, cleanPath)
 	}
 
 	// Custom file reader with path validation
