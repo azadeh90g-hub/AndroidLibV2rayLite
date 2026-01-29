@@ -307,23 +307,25 @@ func measureRequestDelay(ctx context.Context, client *http.Client, url string) (
 			continue
 		}
 
-		// Ensure response body is closed
-		defer func(resp *http.Response) {
-			if resp != nil && resp.Body != nil {
-				resp.Body.Close()
-			}
-		}(resp)
-
+		// ⚡ Bolt: Performance Optimization
+		// The response body must be closed inside the loop to allow the HTTP
+		// client to reuse the underlying TCP connection. Using defer here would
+		// delay the closing until the function returns, causing a resource leak.
 		if resp.StatusCode != http.StatusOK && resp.StatusCode != http.StatusNoContent {
 			lastErr = fmt.Errorf("invalid status: %s", resp.Status)
+			// Drain and close the body to allow connection reuse.
+			io.Copy(io.Discard, resp.Body)
+			resp.Body.Close()
 			continue
 		}
 
-		// Handle possible errors when reading response body
+		// Handle possible errors when reading response body, then close it.
 		if _, err := io.Copy(io.Discard, resp.Body); err != nil {
 			lastErr = fmt.Errorf("failed to read response body: %w", err)
+			resp.Body.Close()
 			continue
 		}
+		resp.Body.Close()
 
 		duration := time.Since(start).Milliseconds()
 		if !success || duration < minDuration {
