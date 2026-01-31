@@ -69,13 +69,19 @@ func InitCoreEnv(envPath string, key string) {
 		setEnvVariable(coreAsset, envPath)
 	}
 
-	// Custom file reader with path validation
+	// Custom file reader with path validation. Optimizes performance by attempting
+	// direct file access before falling back to the Android asset system,
+	// reducing unnecessary system calls.
 	corefilesystem.NewFileReader = func(path string) (io.ReadCloser, error) {
-		if _, err := os.Stat(path); os.IsNotExist(err) {
+		f, err := os.Open(path)
+		if err == nil {
+			return f, nil
+		}
+		if os.IsNotExist(err) {
 			_, file := filepath.Split(path)
 			return mobasset.Open(file)
 		}
-		return os.Open(path)
+		return nil, err
 	}
 }
 
@@ -307,30 +313,30 @@ func measureRequestDelay(ctx context.Context, client *http.Client, url string) (
 			continue
 		}
 
-		// Ensure response body is closed
-		defer func(resp *http.Response) {
-			if resp != nil && resp.Body != nil {
-				resp.Body.Close()
+		// Use a function literal to ensure immediate body closure and allow connection reuse.
+		// Draining the body before closing is necessary for the transport to reuse the connection.
+		err = func(r *http.Response) error {
+			defer r.Body.Close()
+
+			if r.StatusCode != http.StatusOK && r.StatusCode != http.StatusNoContent {
+				return fmt.Errorf("invalid status: %s", r.Status)
 			}
+
+			if _, err := io.Copy(io.Discard, r.Body); err != nil {
+				return fmt.Errorf("failed to read response body: %w", err)
+			}
+
+			duration := time.Since(start).Milliseconds()
+			if !success || duration < minDuration {
+				minDuration = duration
+			}
+			success = true
+			return nil
 		}(resp)
 
-		if resp.StatusCode != http.StatusOK && resp.StatusCode != http.StatusNoContent {
-			lastErr = fmt.Errorf("invalid status: %s", resp.Status)
-			continue
+		if err != nil {
+			lastErr = err
 		}
-
-		// Handle possible errors when reading response body
-		if _, err := io.Copy(io.Discard, resp.Body); err != nil {
-			lastErr = fmt.Errorf("failed to read response body: %w", err)
-			continue
-		}
-
-		duration := time.Since(start).Milliseconds()
-		if !success || duration < minDuration {
-			minDuration = duration
-		}
-
-		success = true
 	}
 	if !success {
 		return -1, lastErr
