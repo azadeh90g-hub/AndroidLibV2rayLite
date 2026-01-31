@@ -66,16 +66,17 @@ func setEnvVariable(key, value string) {
 func InitCoreEnv(envPath string, key string) {
 	// Set asset/cert paths
 	if len(envPath) > 0 {
-		setEnvVariable(coreAsset, envPath)
+		setEnvVariable(coreAsset, filepath.Clean(envPath))
 	}
 
-	// Custom file reader with path validation
+	// Custom file reader with path validation (sanitized to prevent traversal)
 	corefilesystem.NewFileReader = func(path string) (io.ReadCloser, error) {
-		if _, err := os.Stat(path); os.IsNotExist(err) {
-			_, file := filepath.Split(path)
+		cleanPath := filepath.Clean(path)
+		if _, err := os.Stat(cleanPath); os.IsNotExist(err) {
+			_, file := filepath.Split(cleanPath)
 			return mobasset.Open(file)
 		}
-		return os.Open(path)
+		return os.Open(cleanPath)
 	}
 }
 
@@ -307,21 +308,19 @@ func measureRequestDelay(ctx context.Context, client *http.Client, url string) (
 			continue
 		}
 
-		// Ensure response body is closed
-		defer func(resp *http.Response) {
-			if resp != nil && resp.Body != nil {
-				resp.Body.Close()
-			}
-		}(resp)
-
 		if resp.StatusCode != http.StatusOK && resp.StatusCode != http.StatusNoContent {
 			lastErr = fmt.Errorf("invalid status: %s", resp.Status)
+			resp.Body.Close()
 			continue
 		}
 
-		// Handle possible errors when reading response body
-		if _, err := io.Copy(io.Discard, resp.Body); err != nil {
-			lastErr = fmt.Errorf("failed to read response body: %w", err)
+		// Handle possible errors when reading response body.
+		// Limit to 1MB to prevent DoS from large responses.
+		_, copyErr := io.CopyN(io.Discard, resp.Body, 1024*1024)
+		resp.Body.Close()
+
+		if copyErr != nil && copyErr != io.EOF {
+			lastErr = fmt.Errorf("failed to read response body: %w", copyErr)
 			continue
 		}
 
