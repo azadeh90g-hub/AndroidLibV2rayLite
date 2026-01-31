@@ -144,7 +144,7 @@ func (x *CoreController) QueryStats(tag string, direct string) int64 {
 // An error is returned if the connection fails or returns an unexpected status
 func (x *CoreController) MeasureDelay(url string) (int64, error) {
 	if x.httpClient == nil {
-		return -1, errors.New("HTTP client is not initialized")
+		return -1, errors.New("HTTP client is not initialized; call StartLoop before measuring delay")
 	}
 
 	ctx, cancel := context.WithTimeout(context.Background(), 12*time.Second)
