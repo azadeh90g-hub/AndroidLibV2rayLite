@@ -8,6 +8,7 @@ import (
 	"log"
 	"net"
 	"net/http"
+	"net/url"
 	"os"
 	"path/filepath"
 	"strings"
@@ -142,7 +143,7 @@ func (x *CoreController) QueryStats(tag string, direct string) int64 {
 // MeasureDelay measures network latency to a specified URL through the current core instance
 // Uses a 12-second timeout context and returns the round-trip time in milliseconds
 // An error is returned if the connection fails or returns an unexpected status
-func (x *CoreController) MeasureDelay(url string) (int64, error) {
+func (x *CoreController) MeasureDelay(targetURL string) (int64, error) {
 	if x.httpClient == nil {
 		return -1, errors.New("HTTP client is not initialized")
 	}
@@ -150,11 +151,11 @@ func (x *CoreController) MeasureDelay(url string) (int64, error) {
 	ctx, cancel := context.WithTimeout(context.Background(), 12*time.Second)
 	defer cancel()
 
-	return measureRequestDelay(ctx, x.httpClient, url)
+	return measureRequestDelay(ctx, x.httpClient, targetURL)
 }
 
 // MeasureOutboundDelay measures the outbound delay for a given configuration and URL
-func MeasureOutboundDelay(ConfigureFileContent string, url string) (int64, error) {
+func MeasureOutboundDelay(ConfigureFileContent string, targetURL string) (int64, error) {
 	config, err := coreserial.LoadJSONConfig(strings.NewReader(ConfigureFileContent))
 	if err != nil {
 		return -1, fmt.Errorf("Configuration load error: %w", err)
@@ -176,7 +177,7 @@ func MeasureOutboundDelay(ConfigureFileContent string, url string) (int64, error
 	// This function is a one-off measurement, so it's acceptable to create
 	// a new client here. The main performance-critical path in MeasureDelay
 	// uses a cached client.
-	return measureInstDelay(context.Background(), inst, url)
+	return measureInstDelay(context.Background(), inst, targetURL)
 }
 
 // CheckVersionX returns the library and v2fly versions
@@ -245,7 +246,7 @@ func (x *CoreController) doStartLoop(configContent string) error {
 }
 
 // measureInstDelay measures the delay for an instance to a given URL
-func measureInstDelay(ctx context.Context, inst *core.Instance, url string) (int64, error) {
+func measureInstDelay(ctx context.Context, inst *core.Instance, targetURL string) (int64, error) {
 	if inst == nil {
 		return -1, errors.New("core instance is nil")
 	}
@@ -267,17 +268,26 @@ func measureInstDelay(ctx context.Context, inst *core.Instance, url string) (int
 		Timeout:   12 * time.Second,
 	}
 
-	return measureRequestDelay(ctx, client, url)
+	return measureRequestDelay(ctx, client, targetURL)
 }
 
 // measureRequestDelay performs the actual HTTP request and delay measurement.
 // It is designed to be reusable with different http.Client instances.
-func measureRequestDelay(ctx context.Context, client *http.Client, url string) (int64, error) {
-	if url == "" {
-		url = "https://www.google.com/generate_204"
+func measureRequestDelay(ctx context.Context, client *http.Client, targetURL string) (int64, error) {
+	if targetURL == "" {
+		targetURL = "https://www.google.com/generate_204"
 	}
 
-	req, err := http.NewRequestWithContext(ctx, "GET", url, nil)
+	// Validate URL scheme to prevent SSRF or other protocol attacks
+	parsedUrl, err := url.Parse(targetURL)
+	if err != nil {
+		return -1, fmt.Errorf("invalid URL: %w", err)
+	}
+	if parsedUrl.Scheme != "http" && parsedUrl.Scheme != "https" {
+		return -1, fmt.Errorf("unsupported protocol scheme: %s", parsedUrl.Scheme)
+	}
+
+	req, err := http.NewRequestWithContext(ctx, "GET", targetURL, nil)
 	if err != nil {
 		return -1, fmt.Errorf("failed to create HTTP request: %w", err)
 	}
@@ -307,30 +317,31 @@ func measureRequestDelay(ctx context.Context, client *http.Client, url string) (
 			continue
 		}
 
-		// Ensure response body is closed
-		defer func(resp *http.Response) {
-			if resp != nil && resp.Body != nil {
-				resp.Body.Close()
+		// Process response in a closure to ensure the body is closed in each iteration
+		// and to limit the response body read size to prevent DoS.
+		err = func() error {
+			defer resp.Body.Close()
+
+			if resp.StatusCode != http.StatusOK && resp.StatusCode != http.StatusNoContent {
+				return fmt.Errorf("invalid status: %s", resp.Status)
 			}
-		}(resp)
 
-		if resp.StatusCode != http.StatusOK && resp.StatusCode != http.StatusNoContent {
-			lastErr = fmt.Errorf("invalid status: %s", resp.Status)
-			continue
+			// Limit reading to 1MB to prevent DoS attacks
+			if _, err := io.Copy(io.Discard, io.LimitReader(resp.Body, 1024*1024)); err != nil {
+				return fmt.Errorf("failed to read response body: %w", err)
+			}
+
+			duration := time.Since(start).Milliseconds()
+			if !success || duration < minDuration {
+				minDuration = duration
+			}
+			success = true
+			return nil
+		}()
+
+		if err != nil {
+			lastErr = err
 		}
-
-		// Handle possible errors when reading response body
-		if _, err := io.Copy(io.Discard, resp.Body); err != nil {
-			lastErr = fmt.Errorf("failed to read response body: %w", err)
-			continue
-		}
-
-		duration := time.Since(start).Milliseconds()
-		if !success || duration < minDuration {
-			minDuration = duration
-		}
-
-		success = true
 	}
 	if !success {
 		return -1, lastErr
