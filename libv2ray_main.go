@@ -69,13 +69,18 @@ func InitCoreEnv(envPath string, key string) {
 		setEnvVariable(coreAsset, envPath)
 	}
 
-	// Custom file reader with path validation
+	// Custom file reader with optimized path validation.
+	// We attempt to open the file directly to avoid redundant os.Stat calls.
 	corefilesystem.NewFileReader = func(path string) (io.ReadCloser, error) {
-		if _, err := os.Stat(path); os.IsNotExist(err) {
+		f, err := os.Open(path)
+		if err == nil {
+			return f, nil
+		}
+		if errors.Is(err, os.ErrNotExist) {
 			_, file := filepath.Split(path)
 			return mobasset.Open(file)
 		}
-		return os.Open(path)
+		return nil, err
 	}
 }
 
@@ -307,21 +312,20 @@ func measureRequestDelay(ctx context.Context, client *http.Client, url string) (
 			continue
 		}
 
-		// Ensure response body is closed
-		defer func(resp *http.Response) {
-			if resp != nil && resp.Body != nil {
-				resp.Body.Close()
-			}
-		}(resp)
-
 		if resp.StatusCode != http.StatusOK && resp.StatusCode != http.StatusNoContent {
+			resp.Body.Close()
 			lastErr = fmt.Errorf("invalid status: %s", resp.Status)
 			continue
 		}
 
-		// Handle possible errors when reading response body
-		if _, err := io.Copy(io.Discard, resp.Body); err != nil {
-			lastErr = fmt.Errorf("failed to read response body: %w", err)
+		// Read a limited portion of the body (up to 1MB) to ensure the connection can be reused
+		// while avoiding resource exhaustion from large responses.
+		// Explicitly close the body to avoid resource leakage in the loop.
+		_, copyErr := io.Copy(io.Discard, io.LimitReader(resp.Body, 1*1024*1024))
+		resp.Body.Close()
+
+		if copyErr != nil {
+			lastErr = fmt.Errorf("failed to read response body: %w", copyErr)
 			continue
 		}
 
