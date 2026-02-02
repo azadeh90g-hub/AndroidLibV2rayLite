@@ -69,13 +69,19 @@ func InitCoreEnv(envPath string, key string) {
 		setEnvVariable(coreAsset, envPath)
 	}
 
-	// Custom file reader with path validation
+	// Custom file reader with path validation to prevent traversal attacks
 	corefilesystem.NewFileReader = func(path string) (io.ReadCloser, error) {
-		if _, err := os.Stat(path); os.IsNotExist(err) {
-			_, file := filepath.Split(path)
+		cleanPath := filepath.Clean(path)
+		// Reject paths that attempt to escape the current directory using parent-relative segments
+		if strings.HasPrefix(cleanPath, "..") {
+			return nil, fmt.Errorf("security: blocked path traversal attempt: %s", path)
+		}
+
+		if _, err := os.Stat(cleanPath); os.IsNotExist(err) {
+			_, file := filepath.Split(cleanPath)
 			return mobasset.Open(file)
 		}
-		return os.Open(path)
+		return os.Open(cleanPath)
 	}
 }
 
@@ -245,7 +251,7 @@ func (x *CoreController) doStartLoop(configContent string) error {
 }
 
 // measureInstDelay measures the delay for an instance to a given URL
-func measureInstDelay(ctx context.Context, inst *core.Instance, url string) (int64, error) {
+func measureInstDelay(ctx context.Context, inst *core.Instance, targetURL string) (int64, error) {
 	if inst == nil {
 		return -1, errors.New("core instance is nil")
 	}
@@ -267,17 +273,22 @@ func measureInstDelay(ctx context.Context, inst *core.Instance, url string) (int
 		Timeout:   12 * time.Second,
 	}
 
-	return measureRequestDelay(ctx, client, url)
+	return measureRequestDelay(ctx, client, targetURL)
 }
 
 // measureRequestDelay performs the actual HTTP request and delay measurement.
 // It is designed to be reusable with different http.Client instances.
-func measureRequestDelay(ctx context.Context, client *http.Client, url string) (int64, error) {
-	if url == "" {
-		url = "https://www.google.com/generate_204"
+func measureRequestDelay(ctx context.Context, client *http.Client, targetURL string) (int64, error) {
+	if targetURL == "" {
+		targetURL = "https://www.google.com/generate_204"
 	}
 
-	req, err := http.NewRequestWithContext(ctx, "GET", url, nil)
+	// Validate URL scheme to prevent potential security issues with unsupported protocols
+	if !strings.HasPrefix(targetURL, "http://") && !strings.HasPrefix(targetURL, "https://") {
+		return -1, fmt.Errorf("security: invalid URL scheme in %s", targetURL)
+	}
+
+	req, err := http.NewRequestWithContext(ctx, "GET", targetURL, nil)
 	if err != nil {
 		return -1, fmt.Errorf("failed to create HTTP request: %w", err)
 	}
@@ -307,21 +318,23 @@ func measureRequestDelay(ctx context.Context, client *http.Client, url string) (
 			continue
 		}
 
-		// Ensure response body is closed
-		defer func(resp *http.Response) {
-			if resp != nil && resp.Body != nil {
-				resp.Body.Close()
+		// Use an anonymous function to ensure response body is closed in each iteration,
+		// preventing resource leaks, and limit the read size to mitigate DoS risks.
+		err = func() error {
+			defer resp.Body.Close()
+			if resp.StatusCode != http.StatusOK && resp.StatusCode != http.StatusNoContent {
+				return fmt.Errorf("invalid status: %s", resp.Status)
 			}
-		}(resp)
 
-		if resp.StatusCode != http.StatusOK && resp.StatusCode != http.StatusNoContent {
-			lastErr = fmt.Errorf("invalid status: %s", resp.Status)
-			continue
-		}
+			// Handle possible errors when reading response body, limited to 1MB
+			if _, err := io.Copy(io.Discard, io.LimitReader(resp.Body, 1024*1024)); err != nil {
+				return fmt.Errorf("failed to read response body: %w", err)
+			}
+			return nil
+		}()
 
-		// Handle possible errors when reading response body
-		if _, err := io.Copy(io.Discard, resp.Body); err != nil {
-			lastErr = fmt.Errorf("failed to read response body: %w", err)
+		if err != nil {
+			lastErr = err
 			continue
 		}
 
