@@ -70,12 +70,17 @@ func InitCoreEnv(envPath string, key string) {
 	}
 
 	// Custom file reader with path validation
+	// Optimized to try os.Open directly to save a syscall in the common case
 	corefilesystem.NewFileReader = func(path string) (io.ReadCloser, error) {
-		if _, err := os.Stat(path); os.IsNotExist(err) {
+		f, err := os.Open(path)
+		if err == nil {
+			return f, nil
+		}
+		if os.IsNotExist(err) {
 			_, file := filepath.Split(path)
 			return mobasset.Open(file)
 		}
-		return os.Open(path)
+		return nil, err
 	}
 }
 
@@ -301,36 +306,37 @@ func measureRequestDelay(ctx context.Context, client *http.Client, url string) (
 		}
 
 		start := time.Now()
-		resp, err := client.Do(req)
+		// We use an anonymous function to ensure resources are released promptly within the loop.
+		// This prevents resource exhaustion by closing the response body in each iteration.
+		err := func() error {
+			resp, err := client.Do(req)
+			if err != nil {
+				return err
+			}
+			defer resp.Body.Close()
+
+			if resp.StatusCode != http.StatusOK && resp.StatusCode != http.StatusNoContent {
+				return fmt.Errorf("invalid status: %s", resp.Status)
+			}
+
+			// Limit reading to 1MB to prevent resource exhaustion and improve performance
+			// when measuring latency to unknown URLs.
+			if _, err := io.Copy(io.Discard, io.LimitReader(resp.Body, 1*1024*1024)); err != nil {
+				return fmt.Errorf("failed to read response body: %w", err)
+			}
+
+			duration := time.Since(start).Milliseconds()
+			if !success || duration < minDuration {
+				minDuration = duration
+			}
+			success = true
+			return nil
+		}()
+
 		if err != nil {
 			lastErr = err
 			continue
 		}
-
-		// Ensure response body is closed
-		defer func(resp *http.Response) {
-			if resp != nil && resp.Body != nil {
-				resp.Body.Close()
-			}
-		}(resp)
-
-		if resp.StatusCode != http.StatusOK && resp.StatusCode != http.StatusNoContent {
-			lastErr = fmt.Errorf("invalid status: %s", resp.Status)
-			continue
-		}
-
-		// Handle possible errors when reading response body
-		if _, err := io.Copy(io.Discard, resp.Body); err != nil {
-			lastErr = fmt.Errorf("failed to read response body: %w", err)
-			continue
-		}
-
-		duration := time.Since(start).Milliseconds()
-		if !success || duration < minDuration {
-			minDuration = duration
-		}
-
-		success = true
 	}
 	if !success {
 		return -1, lastErr
