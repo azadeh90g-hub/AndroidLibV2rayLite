@@ -70,12 +70,17 @@ func InitCoreEnv(envPath string, key string) {
 	}
 
 	// Custom file reader with path validation
+	// Optimized to try opening the file directly first, reducing syscalls.
 	corefilesystem.NewFileReader = func(path string) (io.ReadCloser, error) {
-		if _, err := os.Stat(path); os.IsNotExist(err) {
+		f, err := os.Open(path)
+		if err == nil {
+			return f, nil
+		}
+		if os.IsNotExist(err) {
 			_, file := filepath.Split(path)
 			return mobasset.Open(file)
 		}
-		return os.Open(path)
+		return nil, err
 	}
 }
 
@@ -272,12 +277,13 @@ func measureInstDelay(ctx context.Context, inst *core.Instance, url string) (int
 
 // measureRequestDelay performs the actual HTTP request and delay measurement.
 // It is designed to be reusable with different http.Client instances.
-func measureRequestDelay(ctx context.Context, client *http.Client, url string) (int64, error) {
-	if url == "" {
-		url = "https://www.google.com/generate_204"
+// Optimized for performance and resource management.
+func measureRequestDelay(ctx context.Context, client *http.Client, targetURL string) (int64, error) {
+	if targetURL == "" {
+		targetURL = "https://www.google.com/generate_204"
 	}
 
-	req, err := http.NewRequestWithContext(ctx, "GET", url, nil)
+	req, err := http.NewRequestWithContext(ctx, "GET", targetURL, nil)
 	if err != nil {
 		return -1, fmt.Errorf("failed to create HTTP request: %w", err)
 	}
@@ -307,23 +313,20 @@ func measureRequestDelay(ctx context.Context, client *http.Client, url string) (
 			continue
 		}
 
-		// Ensure response body is closed
-		defer func(resp *http.Response) {
-			if resp != nil && resp.Body != nil {
-				resp.Body.Close()
-			}
-		}(resp)
-
 		if resp.StatusCode != http.StatusOK && resp.StatusCode != http.StatusNoContent {
+			resp.Body.Close()
 			lastErr = fmt.Errorf("invalid status: %s", resp.Status)
 			continue
 		}
 
 		// Handle possible errors when reading response body
-		if _, err := io.Copy(io.Discard, resp.Body); err != nil {
+		// Use LimitReader to cap at 1MB to prevent excessive resource usage
+		if _, err := io.Copy(io.Discard, io.LimitReader(resp.Body, 1024*1024)); err != nil {
+			resp.Body.Close()
 			lastErr = fmt.Errorf("failed to read response body: %w", err)
 			continue
 		}
+		resp.Body.Close()
 
 		duration := time.Since(start).Milliseconds()
 		if !success || duration < minDuration {
