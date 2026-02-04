@@ -14,18 +14,29 @@ DATADIR="${__dir}/data"
 
 # Check for required dependencies
 check_dependencies() {
-    command -v jq >/dev/null 2>&1 || { echo >&2 "jq is required but it's not installed. Aborting."; exit 1; }
-    command -v go >/dev/null 2>&1 || { echo >&2 "Go is required but it's not installed. Aborting."; exit 1; }
+    for cmd in curl go; do
+        if ! command -v "$cmd" >/dev/null 2>&1; then
+            echo >&2 "Error: $cmd is required but it's not installed. Aborting."
+            exit 1
+        fi
+    done
+}
+
+# Display usage information
+usage() {
+    echo "Usage: $0 [download]"
+    echo "  download: Download geoip.dat and geosite.dat assets (default)"
 }
 
 
 # Download data function
 download_dat() {
+    mkdir -p "$DATADIR"
     echo "Downloading geoip.dat..."
-    curl -sL https://github.com/Loyalsoldier/v2ray-rules-dat/releases/latest/download/geoip.dat -o "$DATADIR/geoip.dat"
+    curl --progress-bar -L https://github.com/Loyalsoldier/v2ray-rules-dat/releases/latest/download/geoip.dat -o "$DATADIR/geoip.dat"
 
     echo "Downloading geosite.dat..."
-    curl -sL https://github.com/Loyalsoldier/v2ray-rules-dat/releases/latest/download/geosite.dat -o "$DATADIR/geosite.dat"
+    curl --progress-bar -L https://github.com/Loyalsoldier/v2ray-rules-dat/releases/latest/download/geosite.dat -o "$DATADIR/geosite.dat"
 }
 
 # Main execution logic
@@ -35,5 +46,10 @@ check_dependencies
 
 case $ACTION in
     "download") download_dat ;;
-    *) echo "Invalid action: $ACTION" ; exit 1 ;;
+    "help"|"-h"|"--help") usage ;;
+    *)
+        echo "Invalid action: $ACTION"
+        usage
+        exit 1
+        ;;
 esac
