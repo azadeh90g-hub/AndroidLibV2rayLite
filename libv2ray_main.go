@@ -69,13 +69,18 @@ func InitCoreEnv(envPath string, key string) {
 		setEnvVariable(coreAsset, envPath)
 	}
 
-	// Custom file reader with path validation
+	// Custom file reader with path validation. Optimized to attempt direct opening first,
+	// reducing syscalls by approximately 50% for existing files.
 	corefilesystem.NewFileReader = func(path string) (io.ReadCloser, error) {
-		if _, err := os.Stat(path); os.IsNotExist(err) {
+		f, err := os.Open(path)
+		if err == nil {
+			return f, nil
+		}
+		if os.IsNotExist(err) {
 			_, file := filepath.Split(path)
 			return mobasset.Open(file)
 		}
-		return os.Open(path)
+		return nil, err
 	}
 }
 
@@ -132,7 +137,8 @@ func (x *CoreController) QueryStats(tag string, direct string) int64 {
 	if x.statsManager == nil {
 		return 0
 	}
-	counter := x.statsManager.GetCounter(fmt.Sprintf("outbound>>>%s>>>traffic>>>%s", tag, direct))
+	// Use string concatenation for better performance in stats retrieval.
+	counter := x.statsManager.GetCounter("outbound>>>" + tag + ">>>traffic>>>" + direct)
 	if counter == nil {
 		return 0
 	}
@@ -220,7 +226,8 @@ func (x *CoreController) doStartLoop(configContent string) error {
 			TLSHandshakeTimeout: 6 * time.Second,
 			DisableKeepAlives:   false,
 			DialContext: func(ctx context.Context, network, addr string) (net.Conn, error) {
-				dest, err := corenet.ParseDestination(fmt.Sprintf("%s:%s", network, addr))
+				// Use string concatenation to optimize dialing performance.
+				dest, err := corenet.ParseDestination(network + ":" + addr)
 				if err != nil {
 					return nil, err
 				}
@@ -254,7 +261,8 @@ func measureInstDelay(ctx context.Context, inst *core.Instance, url string) (int
 		TLSHandshakeTimeout: 6 * time.Second,
 		DisableKeepAlives:   false,
 		DialContext: func(ctx context.Context, network, addr string) (net.Conn, error) {
-			dest, err := corenet.ParseDestination(fmt.Sprintf("%s:%s", network, addr))
+			// Use string concatenation to optimize dialing performance.
+			dest, err := corenet.ParseDestination(network + ":" + addr)
 			if err != nil {
 				return nil, err
 			}
@@ -301,36 +309,37 @@ func measureRequestDelay(ctx context.Context, client *http.Client, url string) (
 		}
 
 		start := time.Now()
-		resp, err := client.Do(req)
+		// Wrap request in anonymous function to ensure immediate body closure
+		// and avoid resource leakage in the retry loop.
+		err = func() error {
+			resp, err := client.Do(req)
+			if err != nil {
+				return err
+			}
+			defer resp.Body.Close()
+
+			if resp.StatusCode != http.StatusOK && resp.StatusCode != http.StatusNoContent {
+				return fmt.Errorf("invalid status: %s", resp.Status)
+			}
+
+			// Handle possible errors when reading response body
+			// Use io.LimitReader to prevent excessive network usage during latency checks.
+			if _, err := io.Copy(io.Discard, io.LimitReader(resp.Body, 1024*1024)); err != nil {
+				return fmt.Errorf("failed to read response body: %w", err)
+			}
+
+			duration := time.Since(start).Milliseconds()
+			if !success || duration < minDuration {
+				minDuration = duration
+			}
+			success = true
+			return nil
+		}()
+
 		if err != nil {
 			lastErr = err
 			continue
 		}
-
-		// Ensure response body is closed
-		defer func(resp *http.Response) {
-			if resp != nil && resp.Body != nil {
-				resp.Body.Close()
-			}
-		}(resp)
-
-		if resp.StatusCode != http.StatusOK && resp.StatusCode != http.StatusNoContent {
-			lastErr = fmt.Errorf("invalid status: %s", resp.Status)
-			continue
-		}
-
-		// Handle possible errors when reading response body
-		if _, err := io.Copy(io.Discard, resp.Body); err != nil {
-			lastErr = fmt.Errorf("failed to read response body: %w", err)
-			continue
-		}
-
-		duration := time.Since(start).Milliseconds()
-		if !success || duration < minDuration {
-			minDuration = duration
-		}
-
-		success = true
 	}
 	if !success {
 		return -1, lastErr
