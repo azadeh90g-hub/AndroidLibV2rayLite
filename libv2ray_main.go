@@ -132,7 +132,9 @@ func (x *CoreController) QueryStats(tag string, direct string) int64 {
 	if x.statsManager == nil {
 		return 0
 	}
-	counter := x.statsManager.GetCounter(fmt.Sprintf("outbound>>>%s>>>traffic>>>%s", tag, direct))
+	// Use string concatenation instead of fmt.Sprintf for better performance in this hot path.
+	// Benchmarks show string concatenation is significantly faster than fmt.Sprintf for simple templates.
+	counter := x.statsManager.GetCounter("outbound>>>" + tag + ">>>traffic>>>" + direct)
 	if counter == nil {
 		return 0
 	}
@@ -220,7 +222,8 @@ func (x *CoreController) doStartLoop(configContent string) error {
 			TLSHandshakeTimeout: 6 * time.Second,
 			DisableKeepAlives:   false,
 			DialContext: func(ctx context.Context, network, addr string) (net.Conn, error) {
-				dest, err := corenet.ParseDestination(fmt.Sprintf("%s:%s", network, addr))
+				// Use string concatenation instead of fmt.Sprintf to reduce overhead in the connection hot path.
+				dest, err := corenet.ParseDestination(network + ":" + addr)
 				if err != nil {
 					return nil, err
 				}
@@ -254,7 +257,8 @@ func measureInstDelay(ctx context.Context, inst *core.Instance, url string) (int
 		TLSHandshakeTimeout: 6 * time.Second,
 		DisableKeepAlives:   false,
 		DialContext: func(ctx context.Context, network, addr string) (net.Conn, error) {
-			dest, err := corenet.ParseDestination(fmt.Sprintf("%s:%s", network, addr))
+			// Use string concatenation instead of fmt.Sprintf to reduce overhead in the connection hot path.
+			dest, err := corenet.ParseDestination(network + ":" + addr)
 			if err != nil {
 				return nil, err
 			}
