@@ -71,6 +71,12 @@ func InitCoreEnv(envPath string, key string) {
 
 	// Custom file reader with path validation
 	corefilesystem.NewFileReader = func(path string) (io.ReadCloser, error) {
+		// Security: Prevent path traversal by cleaning and validating the path
+		path = filepath.Clean(path)
+		if strings.HasPrefix(path, "..") {
+			return nil, errors.New("security: path traversal detected")
+		}
+
 		if _, err := os.Stat(path); os.IsNotExist(err) {
 			_, file := filepath.Split(path)
 			return mobasset.Open(file)
@@ -272,12 +278,17 @@ func measureInstDelay(ctx context.Context, inst *core.Instance, url string) (int
 
 // measureRequestDelay performs the actual HTTP request and delay measurement.
 // It is designed to be reusable with different http.Client instances.
-func measureRequestDelay(ctx context.Context, client *http.Client, url string) (int64, error) {
-	if url == "" {
-		url = "https://www.google.com/generate_204"
+func measureRequestDelay(ctx context.Context, client *http.Client, targetURL string) (int64, error) {
+	if targetURL == "" {
+		targetURL = "https://www.google.com/generate_204"
 	}
 
-	req, err := http.NewRequestWithContext(ctx, "GET", url, nil)
+	// Security: Validate URL scheme to mitigate SSRF and other protocol attacks.
+	if !strings.HasPrefix(targetURL, "http://") && !strings.HasPrefix(targetURL, "https://") {
+		return -1, fmt.Errorf("security: invalid URL scheme: %s", targetURL)
+	}
+
+	req, err := http.NewRequestWithContext(ctx, "GET", targetURL, nil)
 	if err != nil {
 		return -1, fmt.Errorf("failed to create HTTP request: %w", err)
 	}
@@ -289,48 +300,49 @@ func measureRequestDelay(ctx context.Context, client *http.Client, url string) (
 	// Add exception handling and increase retry attempts
 	const attempts = 2
 	for i := 0; i < attempts; i++ {
-		select {
-		case <-ctx.Done():
-			// Return immediately when context is canceled
-			if !success {
-				return -1, ctx.Err()
+		// Use an anonymous function to ensure response body is closed immediately
+		// per iteration, preventing resource exhaustion (file descriptor leak).
+		err = func() error {
+			select {
+			case <-ctx.Done():
+				return ctx.Err()
+			default:
+				// Continue execution
 			}
-			return minDuration, nil
-		default:
-			// Continue execution
-		}
 
-		start := time.Now()
-		resp, err := client.Do(req)
+			start := time.Now()
+			resp, err := client.Do(req)
+			if err != nil {
+				return err
+			}
+			defer resp.Body.Close()
+
+			if resp.StatusCode != http.StatusOK && resp.StatusCode != http.StatusNoContent {
+				return fmt.Errorf("invalid status: %s", resp.Status)
+			}
+
+			// Security: Use io.LimitReader to cap response body reads at 1MB,
+			// protecting against Denial-of-Service (DoS) from oversized responses.
+			limitedReader := io.LimitReader(resp.Body, 1024*1024)
+			if _, err := io.Copy(io.Discard, limitedReader); err != nil {
+				return fmt.Errorf("failed to read response body: %w", err)
+			}
+
+			duration := time.Since(start).Milliseconds()
+			if !success || duration < minDuration {
+				minDuration = duration
+			}
+			success = true
+			return nil
+		}()
+
 		if err != nil {
 			lastErr = err
-			continue
-		}
-
-		// Ensure response body is closed
-		defer func(resp *http.Response) {
-			if resp != nil && resp.Body != nil {
-				resp.Body.Close()
+			// If context is canceled or timed out, stop retrying.
+			if errors.Is(err, context.Canceled) || errors.Is(err, context.DeadlineExceeded) {
+				break
 			}
-		}(resp)
-
-		if resp.StatusCode != http.StatusOK && resp.StatusCode != http.StatusNoContent {
-			lastErr = fmt.Errorf("invalid status: %s", resp.Status)
-			continue
 		}
-
-		// Handle possible errors when reading response body
-		if _, err := io.Copy(io.Discard, resp.Body); err != nil {
-			lastErr = fmt.Errorf("failed to read response body: %w", err)
-			continue
-		}
-
-		duration := time.Since(start).Milliseconds()
-		if !success || duration < minDuration {
-			minDuration = duration
-		}
-
-		success = true
 	}
 	if !success {
 		return -1, lastErr
