@@ -23,9 +23,15 @@ check_dependencies() {
 download_dat() {
     echo "Downloading geoip.dat..."
     curl -sL https://github.com/Loyalsoldier/v2ray-rules-dat/releases/latest/download/geoip.dat -o "$DATADIR/geoip.dat"
+    curl -sL https://github.com/Loyalsoldier/v2ray-rules-dat/releases/latest/download/geoip.dat.sha256sum -o "$DATADIR/geoip.dat.sha256sum"
+    echo "Verifying geoip.dat..."
+    (cd "$DATADIR" && sha256sum -c geoip.dat.sha256sum)
 
     echo "Downloading geosite.dat..."
     curl -sL https://github.com/Loyalsoldier/v2ray-rules-dat/releases/latest/download/geosite.dat -o "$DATADIR/geosite.dat"
+    curl -sL https://github.com/Loyalsoldier/v2ray-rules-dat/releases/latest/download/geosite.dat.sha256sum -o "$DATADIR/geosite.dat.sha256sum"
+    echo "Verifying geosite.dat..."
+    (cd "$DATADIR" && sha256sum -c geosite.dat.sha256sum)
 }
 
 # Main execution logic
